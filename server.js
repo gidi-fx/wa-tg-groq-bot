@@ -14,13 +14,18 @@ import {
   listUsers,
 } from './userStore.js';
 import {
-  initSessions,
+  initTelegramClients,
+  handleTelegramMessage,
   getTelegramStatus,
   getSessionLoadInfo,
+  getDebugInfo,
   hasSessions,
   exportSessions,
   sendCode,
   verifyCode,
+  getQR,
+  getQRStatus,
+  cancelQR,
   listSessions,
   logout,
 } from './telegramManager.js';
@@ -52,7 +57,7 @@ for (const level of ['log', 'warn', 'error']) {
   };
 }
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 10000);
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').trim().replace(/[/]+$/, '');
 const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 const evolutionHeaders = { apikey: EVOLUTION_API_KEY };
@@ -225,6 +230,9 @@ app.get('/api/status', async (req, res) => {
       telegramVerifyCode: '/telegram/verify-code',
       telegramSessions: '/telegram/sessions',
       telegramLogout: '/telegram/logout',
+      telegramQr: '/telegram/qr',
+      telegramQrStatus: '/telegram/qr-status',
+      telegramDebug: '/telegram/debug',
     },
     telegram: getTelegramStatus(),
     telegramSessionsFromEnv: getSessionLoadInfo(),
@@ -250,42 +258,96 @@ app.get('/health', (req, res) => {
 /* -------------------------------- Telegram ---------------------------------- */
 
 app.post('/telegram/send-code', async (req, res) => {
+  const body = req.body || {};
   try {
-    const body = req.body || {};
     const result = await sendCode(body.phone);
-    res.json(result);
+    res.json({
+      phone: result.phone,
+      phoneCodeHash: result.phoneCodeHash,
+      isCodeViaApp: result.isCodeViaApp,
+      message: 'Check Telegram app > Chat Telegram for code',
+      success: true,
+    });
   } catch (err) {
-    console.error('[telegram] send-code failed:', err.message);
-    res.status(400).json({ success: false, error: err.message });
+    const detail = err && (err.errorMessage || err.message) ? err.errorMessage || err.message : String(err);
+    console.error(`[telegram] send-code failed for ${body.phone || '(no phone)'}:`, detail);
+    res.status(400).json({
+      success: false,
+      phone: body.phone || null,
+      error: detail,
+      errorMessage: (err && err.errorMessage) || null,
+      hint: 'Check TELEGRAM_API_ID / TELEGRAM_API_HASH are valid and the number uses international format',
+    });
   }
 });
 
 app.post('/telegram/verify-code', async (req, res) => {
+  const body = req.body || {};
   try {
-    const body = req.body || {};
-    const result = await verifyCode({
-      phone: body.phone,
-      code: body.code,
-      phoneCodeHash: body.phoneCodeHash,
-      password: body.password,
-    });
+    const result = await verifyCode(
+      body.phone,
+      body.code,
+      body.phoneCodeHash,
+      body.password,
+      handleTelegramMessage,
+    );
 
     if (result && result.success && result.sessionSaved) {
       const { base64 } = exportSessions();
-      console.log('=== PERSIST THIS TO RENDER ENV ===');
-      console.log('TELEGRAM_SESSIONS_JSON=' + base64);
-      console.log('=== END ===');
-      result.session = result.session || '';
       result.envValue = base64;
       result.instruction =
+        result.instruction ||
         'Copy this base64 to Render env TELEGRAM_SESSIONS_JSON to survive redeploys';
     }
 
     res.json(result);
   } catch (err) {
-    console.error('[telegram] verify-code failed:', err.message);
-    res.status(400).json({ success: false, error: err.message });
+    const detail = err && (err.errorMessage || err.message) ? err.errorMessage || err.message : String(err);
+    console.error(`[telegram] verify-code failed for ${body.phone || '(no phone)'}:`, detail);
+    res.status(400).json({
+      success: false,
+      phone: body.phone || null,
+      error: detail,
+      errorMessage: (err && err.errorMessage) || null,
+    });
   }
+});
+
+/* ------------------------------ Telegram QR login ---------------------------- */
+
+app.get('/telegram/qr', async (req, res) => {
+  try {
+    const password = req.query.password ? String(req.query.password) : undefined;
+    const result = await getQR(password);
+    res.json(result);
+  } catch (err) {
+    const detail = err && (err.errorMessage || err.message) ? err.errorMessage || err.message : String(err);
+    console.error('[telegram] qr failed:', detail);
+    res.status(400).json({ success: false, status: 'error', error: detail });
+  }
+});
+
+app.get('/telegram/qr-status', async (req, res) => {
+  try {
+    // ?password= supplies the 2FA password when status is "password-needed".
+    if (req.query.password && getQRStatus().status === 'password-needed') {
+      const result = await getQR(String(req.query.password));
+      return res.json(result);
+    }
+    res.json(getQRStatus());
+  } catch (err) {
+    const detail = err && (err.errorMessage || err.message) ? err.errorMessage || err.message : String(err);
+    console.error('[telegram] qr-status failed:', detail);
+    res.status(400).json({ success: false, status: 'error', error: detail });
+  }
+});
+
+app.post('/telegram/qr-cancel', async (req, res) => {
+  res.json(await cancelQR());
+});
+
+app.get('/telegram/debug', (req, res) => {
+  res.json({ ok: true, ...getDebugInfo(), status: getTelegramStatus() });
 });
 
 app.get('/telegram/sessions', (req, res) => {
@@ -395,19 +457,24 @@ async function checkEvolution() {
   }
 }
 
-app.listen(PORT, '0.0.0.0', async () => {
-  console.log(`wa-tg-groq-bot listening on 0.0.0.0:${PORT}`);
+async function start() {
+  const loadInfo = getSessionLoadInfo();
+  console.log(
+    `Loaded ${loadInfo.fromEnv} sessions from ENV, ${loadInfo.fromFile} from file (${loadInfo.total} total)`,
+  );
   console.log(`[models] chat=${CHAT_MODEL} transcription=${TRANSCRIBE_MODEL}`);
 
-  const loadInfo = getSessionLoadInfo();
-  if (loadInfo.fromEnv > 0) {
-    console.log(`Loaded ${loadInfo.fromEnv} sessions from ENV`);
-  } else if (loadInfo.total > 0) {
-    console.log(`Loaded ${loadInfo.total} sessions from file (TELEGRAM_SESSIONS_JSON not set)`);
-  } else {
-    console.log('Loaded 0 sessions from ENV');
-  }
+  // Activate every saved session and attach its message handler before listening.
+  await initTelegramClients(handleTelegramMessage);
 
-  await checkEvolution();
-  await initSessions();
+  app.listen(PORT, '0.0.0.0', async () => {
+    console.log(`wa-tg-groq-bot listening on 0.0.0.0:${PORT}`);
+    console.log(`[telegram] active clients: ${JSON.stringify(getDebugInfo().activeClients)}`);
+    await checkEvolution();
+  });
+}
+
+start().catch((err) => {
+  console.error('[server] startup failed:', err && err.stack ? err.stack : err);
+  process.exit(1);
 });
