@@ -35,11 +35,21 @@ export function normalizePhone(phone) {
   return digits;
 }
 
+function newUser(phone) {
+  return {
+    phone: phone || '',
+    waJid: null,
+    telegramPhone: null,
+    name: null,
+    history: [],
+    createdAt: new Date().toISOString(),
+  };
+}
+
 export function getUserByPhone(phone) {
   const normalized = normalizePhone(phone);
   if (!normalized) return null;
-  const db = readDb();
-  return db.users.find((user) => normalizePhone(user.phone) === normalized) || null;
+  return readDb().users.find((user) => normalizePhone(user.phone) === normalized) || null;
 }
 
 export function getUserByWaJid(jid) {
@@ -48,6 +58,7 @@ export function getUserByWaJid(jid) {
   const db = readDb();
   const direct = db.users.find((user) => user.waJid && user.waJid === raw);
   if (direct) return direct;
+
   const normalized = normalizePhone(raw.split('@')[0]);
   if (!normalized) return null;
   return (
@@ -58,56 +69,41 @@ export function getUserByWaJid(jid) {
   );
 }
 
-export function getUserByTelegramChatId(chatId) {
-  if (chatId === undefined || chatId === null || chatId === '') return null;
-  const target = String(chatId);
-  const db = readDb();
+export function getUserByTelegramPhone(phone) {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return null;
   return (
-    db.users.find(
+    readDb().users.find(
       (user) =>
-        (user.telegramChatId && String(user.telegramChatId) === target) ||
-        (user.telegramId && String(user.telegramId) === target),
+        (user.telegramPhone && normalizePhone(user.telegramPhone) === normalized) ||
+        normalizePhone(user.phone) === normalized,
     ) || null
   );
 }
 
 /**
  * Create or update a user. The phone number is the identity: a WhatsApp JID and a
- * Telegram account with the same phone end up on the same record (and history).
+ * Telegram login with the same phone end up on the same record (and history).
  */
-export function saveUser({ phone, waJid, telegramId, chatId, name } = {}) {
+export function saveUser({ phone, waJid, telegramPhone, name } = {}) {
   const db = readDb();
   const normalized = normalizePhone(phone);
 
   let user = null;
   if (normalized) user = db.users.find((u) => normalizePhone(u.phone) === normalized) || null;
   if (!user && waJid) user = db.users.find((u) => u.waJid && u.waJid === waJid) || null;
-  if (!user && chatId) {
-    user =
-      db.users.find(
-        (u) =>
-          (u.telegramChatId && String(u.telegramChatId) === String(chatId)) ||
-          (u.telegramId && String(u.telegramId) === String(chatId)),
-      ) || null;
+  if (!user && telegramPhone) {
+    user = db.users.find((u) => u.telegramPhone && normalizePhone(u.telegramPhone) === normalized) || null;
   }
 
   if (!user) {
-    user = {
-      phone: normalized || '',
-      waJid: null,
-      telegramId: null,
-      telegramChatId: null,
-      name: null,
-      history: [],
-      createdAt: new Date().toISOString(),
-    };
+    user = newUser(normalized);
     db.users.push(user);
   }
 
   if (!user.phone && normalized) user.phone = normalized;
   if (waJid) user.waJid = waJid;
-  if (telegramId) user.telegramId = String(telegramId);
-  if (chatId) user.telegramChatId = String(chatId);
+  if (telegramPhone) user.telegramPhone = normalizePhone(telegramPhone);
   if (name) user.name = name;
   if (!Array.isArray(user.history)) user.history = [];
   user.updatedAt = new Date().toISOString();
@@ -130,15 +126,7 @@ export function addMessage(phone, role, content) {
   let user = db.users.find((u) => normalizePhone(u.phone) === normalized);
 
   if (!user) {
-    user = {
-      phone: normalized,
-      waJid: null,
-      telegramId: null,
-      telegramChatId: null,
-      name: null,
-      history: [],
-      createdAt: new Date().toISOString(),
-    };
+    user = newUser(normalized);
     db.users.push(user);
   }
 
@@ -155,8 +143,7 @@ export function listUsers() {
   return readDb().users.map((user) => ({
     phone: user.phone || null,
     waJid: user.waJid || null,
-    telegramId: user.telegramId || null,
-    telegramChatId: user.telegramChatId || null,
+    telegramPhone: user.telegramPhone || null,
     name: user.name || null,
     messages: Array.isArray(user.history) ? user.history.length : 0,
     updatedAt: user.updatedAt || null,
