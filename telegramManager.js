@@ -28,45 +28,146 @@ const listening = new Set();
 
 /* ---------------------------------- storage --------------------------------- */
 
-function readSessions() {
+/**
+ * phone -> session string. Kept in memory and mirrored to telegram_sessions.json.
+ * On boot it is seeded from ENV first, because Render's free tier wipes the
+ * filesystem on every redeploy: TELEGRAM_SESSIONS_JSON (base64 or raw JSON) or
+ * the legacy single-user TELEGRAM_SESSION.
+ */
+const sessions = Object.create(null);
+
+let envSessionsLoaded = 0;
+let fileSessionsLoaded = 0;
+
+function sessionKey(phone) {
+  const raw = String(phone === undefined || phone === null ? '' : phone).trim();
+  if (!raw) return '';
+  return normalizePhone(raw) || raw;
+}
+
+function extractSessions(parsed) {
+  if (!parsed || typeof parsed !== 'object') return {};
+  if (parsed.sessions && typeof parsed.sessions === 'object') return parsed.sessions;
+  return parsed;
+}
+
+function parseEnvSessions(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return null;
+  let json = value;
+  if (value.startsWith('eyJ')) {
+    try {
+      json = Buffer.from(value, 'base64').toString('utf8').trim();
+    } catch (err) {
+      console.error('[telegram] could not base64-decode TELEGRAM_SESSIONS_JSON:', err.message);
+      return null;
+    }
+  }
   try {
-    if (!fs.existsSync(SESSIONS_FILE)) return { sessions: {} };
-    const raw = fs.readFileSync(SESSIONS_FILE, 'utf8');
-    const parsed = raw.trim() ? JSON.parse(raw) : {};
-    if (!parsed.sessions || typeof parsed.sessions !== 'object') parsed.sessions = {};
-    return parsed;
+    return JSON.parse(json);
   } catch (err) {
-    console.error('[telegram] could not read telegram_sessions.json:', err.message);
-    return { sessions: {} };
+    console.error('[telegram] could not parse TELEGRAM_SESSIONS_JSON:', err.message);
+    return null;
   }
 }
 
-function writeSessions(db) {
-  fs.writeFileSync(SESSIONS_FILE, JSON.stringify(db, null, 2) + '\n', { mode: 0o600 });
+function loadSessionsFromEnv() {
+  const parsed = parseEnvSessions(process.env.TELEGRAM_SESSIONS_JSON);
+  if (parsed) {
+    for (const [phone, session] of Object.entries(extractSessions(parsed))) {
+      const key = sessionKey(phone);
+      if (key && typeof session === 'string' && session) {
+        sessions[key] = session;
+        envSessionsLoaded += 1;
+      }
+    }
+  }
+
+  const legacy = String(process.env.TELEGRAM_SESSION || '').trim();
+  if (legacy && !sessions.default) {
+    sessions.default = legacy;
+    envSessionsLoaded += 1;
+  }
+}
+
+function loadSessionsFromFile() {
+  try {
+    if (!fs.existsSync(SESSIONS_FILE)) return;
+    const raw = fs.readFileSync(SESSIONS_FILE, 'utf8');
+    const parsed = raw.trim() ? JSON.parse(raw) : {};
+    for (const [phone, session] of Object.entries(extractSessions(parsed))) {
+      const key = sessionKey(phone);
+      if (key && typeof session === 'string' && session && !sessions[key]) {
+        sessions[key] = session;
+        fileSessionsLoaded += 1;
+      }
+    }
+  } catch (err) {
+    console.error('[telegram] could not read telegram_sessions.json:', err.message);
+  }
+}
+
+/** Full session store as JSON and as the base64 value Render needs. */
+export function exportSessions() {
+  const json = JSON.stringify(sessions);
+  const base64 = Buffer.from(json).toString('base64');
+  return {
+    json,
+    base64,
+    env: `TELEGRAM_SESSIONS_JSON=${base64}`,
+    count: Object.keys(sessions).length,
+  };
+}
+
+/** Mirror the in-memory sessions to disk and log the Render-ready value. */
+function writeSessions() {
+  try {
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify({ sessions }, null, 2) + '\n', { mode: 0o600 });
+  } catch (err) {
+    console.error('[telegram] could not write telegram_sessions.json:', err.message);
+  }
+  const { base64, count } = exportSessions();
+  console.log(`[telegram] sessions saved (${count}). TELEGRAM_SESSIONS_JSON=${base64}`);
+  return base64;
+}
+
+export function getSessionLoadInfo() {
+  return {
+    fromEnv: envSessionsLoaded,
+    fromFile: fileSessionsLoaded,
+    total: Object.keys(sessions).length,
+  };
+}
+
+export function hasSessions() {
+  return Object.keys(sessions).length > 0;
 }
 
 function getSession(phone) {
-  const normalized = normalizePhone(phone);
-  if (!normalized) return '';
-  return readSessions().sessions[normalized] || '';
+  const key = sessionKey(phone);
+  if (!key) return '';
+  return sessions[key] || '';
 }
 
 function saveSession(phone, sessionString) {
-  const normalized = normalizePhone(phone);
-  if (!normalized || !sessionString) return;
-  const db = readSessions();
-  db.sessions[normalized] = sessionString;
-  writeSessions(db);
+  const key = sessionKey(phone);
+  if (!key || !sessionString) return '';
+  sessions[key] = sessionString;
+  return writeSessions();
 }
 
 function deleteSession(phone) {
-  const normalized = normalizePhone(phone);
-  if (!normalized) return;
-  const db = readSessions();
-  if (!(normalized in db.sessions)) return;
-  delete db.sessions[normalized];
-  writeSessions(db);
+  const key = sessionKey(phone);
+  if (!key || !(key in sessions)) return false;
+  delete sessions[key];
+  writeSessions();
+  return true;
 }
+
+// ENV wins, the file fills any gaps, then the file is kept in sync for local dev.
+loadSessionsFromEnv();
+loadSessionsFromFile();
+if (Object.keys(sessions).length) writeSessions();
 
 /* ----------------------------------- client --------------------------------- */
 
@@ -260,7 +361,7 @@ export async function verifyCode({ phone, code, phoneCodeHash, password } = {}) 
   }
 
   const sessionString = client.session.save();
-  saveSession(normalized, sessionString);
+  const envValue = saveSession(normalized, sessionString);
 
   clients.set(normalized, client);
   pendingClients.delete(normalized);
@@ -295,6 +396,10 @@ export async function verifyCode({ phone, code, phoneCodeHash, password } = {}) 
     phone: normalized,
     message: 'Login successful. Session saved on the server.',
     account,
+    session: sessionString,
+    envValue,
+    instruction:
+      'Copy this base64 to Render env TELEGRAM_SESSIONS_JSON to survive redeploys',
   };
 }
 
@@ -341,13 +446,12 @@ export async function sendTelegramMessage(phone, chatId, text) {
 }
 
 export function listSessions() {
-  const db = readSessions();
-  const phones = new Set([...Object.keys(db.sessions), ...clients.keys()]);
+  const phones = new Set([...Object.keys(sessions), ...clients.keys()]);
   return [...phones].map((phone) => {
     const client = clients.get(phone);
     return {
       phone,
-      sessionSaved: Boolean(db.sessions[phone]),
+      sessionSaved: Boolean(sessions[phone]),
       connected: Boolean(client && client.connected),
       listening: listening.has(phone),
     };
@@ -396,7 +500,7 @@ export async function initSessions() {
     return;
   }
 
-  const phones = Object.keys(readSessions().sessions);
+  const phones = Object.keys(sessions);
   if (!phones.length) {
     console.log('[telegram] no saved sessions yet. Users log in via POST /telegram/send-code');
     return;
