@@ -1,122 +1,110 @@
 # wa-tg-groq-bot
 
-A Node.js (ESM) service that puts one Groq-powered AI assistant on **both WhatsApp and Telegram**, with a **shared conversation history per phone number**.
+WhatsApp (Evolution API) and Telegram (MTProto user login) bridge with Groq agents for text and voice.
 
-- **WhatsApp** via [Evolution API](https://github.com/EvolutionAPI/evolution-api) webhooks (`messages.upsert`).
-- **Telegram** via **MTProto** using [GramJS](https://github.com/gram-js/gramjs) and a **real phone login** — no bot token, no Telegraf.
-- Voice notes on either platform are transcribed with Groq `whisper-large-v3` and answered as text.
-- Text replies use Groq `qwen/qwen3-32b`.
+- **No bot.** No bot token, no Telegraf. Telegram runs as real user accounts over MTProto.
+- **Multi-user Telegram.** One `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` for the whole app; every user logs in with their own phone number and login code.
+- **No instance name in env.** WhatsApp instances are created on demand and taken from the webhook payload.
+- **Voice notes** are transcribed with Groq `whisper-large-v3`; replies come from Groq `qwen/qwen3-32b`.
+- **Phone linking.** WhatsApp and Telegram with the same phone number share one user record and one conversation history.
 
-```
-WhatsApp --(Evolution webhook)--> server.js --\
-                                              >-- agents.js (Groq) --> users.json (per-phone history)
-Telegram --(GramJS MTProto)----> telegramClient.js --/
-```
-
-## Files
-
-| File | Purpose |
-| --- | --- |
-| `server.js` | Express app: WhatsApp webhook, Telegram auth routes, `/users`, startup |
-| `telegramClient.js` | GramJS client, MTProto phone login, incoming-message handler, `sendTelegram` |
-| `userStore.js` | `users.json` store, `normalizePhone`, lookup/merge by phone, history |
-| `agents.js` | Groq chat agent + Whisper transcription |
-| `render.yaml` | Render blueprint (Node web service) |
-
-## Requirements
-
-- Node.js 18 or newer
-- An Evolution API instance with a connected WhatsApp number
-- A Groq API key — https://console.groq.com/keys
-- Telegram `api_id` / `api_hash` — https://my.telegram.org
-- A phone number with an active Telegram account (this becomes the "assistant" account that replies)
-
-## Environment variables
-
-Copy `.env.example` to `.env` and fill it in.
-
-| Variable | Description |
-| --- | --- |
-| `PORT` | HTTP port, default `3000` (Render sets this automatically) |
-| `EVOLUTION_API_URL` | Base URL of your Evolution API, e.g. `https://evo.example.com` |
-| `EVOLUTION_API_KEY` | Global API key (`AUTHENTICATION_API_KEY` in Evolution) |
-| `EVOLUTION_INSTANCE` | Instance name, e.g. `my-bot` |
-| `GROQ_API_KEY` | Groq API key |
-| `TELEGRAM_API_ID` | Numeric `api_id` from my.telegram.org |
-| `TELEGRAM_API_HASH` | `api_hash` from my.telegram.org |
-| `TELEGRAM_PHONE` | Phone of the Telegram account that will be logged in (`+234...`) |
-| `TELEGRAM_SESSION` | `StringSession` string — empty on first run, filled after login |
-
-## 1. Get Telegram API_ID / API_HASH
-
-1. Open https://my.telegram.org and log in with the phone number you want the bot to use.
-2. Go to **API development tools**.
-3. Create an app (any name, platform "Other" is fine).
-4. Copy **App api_id** and **App api_hash** into `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`.
-
-These identify the *application*, not the account. The account is the phone number you log in with.
-
-## 2. First-time Telegram login (get `TELEGRAM_SESSION`)
-
-Start the server (locally or on Render) with `TELEGRAM_SESSION` empty — you will see `Go to /auth/telegram to login`.
+## Environment
 
 ```bash
-# Step 1: instructions and current status
-curl https://YOUR-APP/auth/telegram
-
-# Step 2: ask Telegram to send a login code
-curl -X POST https://YOUR-APP/auth/telegram/send-code \
-  -H 'Content-Type: application/json' \
-  -d '{"phone":"+2348012345678"}'
-
-# Step 3: submit the code Telegram sent you inside the Telegram app
-curl -X POST https://YOUR-APP/auth/telegram/verify-code \
-  -H 'Content-Type: application/json' \
-  -d '{"code":"12345"}'
+PORT=3000
+EVOLUTION_API_URL=https://your-evolution-host
+EVOLUTION_API_KEY=your-evolution-api-key
+GROQ_API_KEY=your-groq-api-key
+TELEGRAM_API_ID=1234567
+TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
 ```
 
-- If the account has **2FA enabled**, the third call returns `{"needsPassword":true}`. Repeat it with the password:
-  `-d '{"code":"12345","password":"your-2fa-password"}'`
-- On success the response contains `session` and the server log prints:
+That is the complete list. There is **no** `EVOLUTION_INSTANCE`, no `TELEGRAM_PHONE`, and no `TELEGRAM_SESSION` to configure - sessions are created per user at login and stored in `telegram_sessions.json`.
 
-  ```
-  [telegram] LOGIN OK. Save this value as TELEGRAM_SESSION: 1BVtsOK...
-  ```
-
-- Put that string into `TELEGRAM_SESSION`, restart/redeploy. The client now connects on boot and listens for incoming messages.
-- Keep the session secret — it is a full login for that Telegram account. The auth endpoints are unauthenticated, so remove/disable them (or protect them) once you have your session.
-
-Incoming messages to the logged-in account are answered as that account. Outgoing messages are ignored, so the bot never replies to itself.
-
-## 3. Evolution API webhook
-
-Create/connect an instance in Evolution (QR scan), then point its webhook at this app:
+## Run locally
 
 ```bash
-curl -X POST "https://YOUR-EVOLUTION/api/v1/webhook/set/YOUR_INSTANCE" \
-  -H "apikey: YOUR_EVOLUTION_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "webhook": {
-      "enabled": true,
-      "url": "https://YOUR-APP/webhook/evolution",
-      "events": ["MESSAGES_UPSERT"]
-    }
-  }'
+cp .env.example .env    # then fill in the values
+npm install
+npm start
 ```
 
-You can do the same from the Evolution manager UI (Webhook section). On boot the app logs the instance connection state by calling `GET /instance/connectionState/{instance}`.
+## Telegram: every user logs in with their own phone
 
-The webhook handler:
+`telegram_sessions.json` holds one session string per phone:
 
-- ignores `fromMe` and group/broadcast JIDs,
-- reads text from `conversation`, `extendedTextMessage.text`, or an image/video/document caption,
-- for `audioMessage`, calls `POST /chat/getBase64FromMediaMessage/{instance}` with the raw message, then transcribes the base64 audio with Groq,
-- replies with `POST /message/sendText/{instance}`.
+```json
+{ "sessions": { "2348021234567": "1BVtsOK4Bu..." } }
+```
 
-## 4. Phone linking
+It is gitignored; it contains account credentials, so never commit or share it.
 
-`users.json` holds one record per person:
+### 1. Send the code
+
+```bash
+curl -X POST http://localhost:3000/telegram/send-code \
+  -H 'Content-Type: application/json' \
+  -d '{"phone":"2348021234567"}'
+```
+
+```json
+{
+  "success": true,
+  "phone": "2348021234567",
+  "phoneCodeHash": "8f3c...",
+  "message": "Code sent to Telegram"
+}
+```
+
+The code arrives in the user's Telegram app (or by SMS).
+
+### 2. Verify the code
+
+```bash
+curl -X POST http://localhost:3000/telegram/verify-code \
+  -H 'Content-Type: application/json' \
+  -d '{"phone":"2348021234567","code":"12345","phoneCodeHash":"8f3c..."}'
+```
+
+`{"success":true,"sessionSaved":true,...}` means the session was saved and the client is now listening for incoming messages. If the account has 2FA, the first response is `{"success":false,"needsPassword":true}`; repeat the same request with the extra field `"password":"your-2fa-password"`.
+
+### 3. Manage sessions
+
+```bash
+curl http://localhost:3000/telegram/sessions                       # logged-in phones
+curl -X POST http://localhost:3000/telegram/logout \
+  -H 'Content-Type: application/json' -d '{"phone":"2348021234567"}'
+```
+
+On startup the app reconnects every saved session and re-registers its message handler, so no re-login is needed after a normal restart.
+
+### How replies work
+
+For each logged-in account the app listens for incoming messages (`NewMessage({ incoming: true })`), ignores its own outgoing messages, resolves the sender, transcribes voice notes when needed, asks the Groq agent, and replies in the same chat. The identity used for memory is the **logged-in account's phone**, which is what links Telegram to WhatsApp.
+
+## WhatsApp: no instance name
+
+Instances are created through this app:
+
+```bash
+curl -X POST http://localhost:3000/instance/create \
+  -H 'Content-Type: application/json' \
+  -d '{"instanceName":"my-phone"}'
+```
+
+The Evolution response (including the QR code) is returned as `evolution`. Scan it with WhatsApp, then point the instance webhook at:
+
+```
+POST https://YOUR-APP/webhook/evolution
+```
+
+Enable the `MESSAGES_UPSERT` event. The instance name is read from the webhook payload (`instance`, or `?instance=` as a fallback, otherwise `any`), and the same name is used to send the reply - nothing is hardcoded.
+
+Text, captions and voice notes are supported. Group JIDs (`@g.us`) and status broadcasts are ignored, and messages sent by the account itself are skipped.
+
+## Phone linking
+
+`users.json`:
 
 ```json
 {
@@ -124,62 +112,41 @@ The webhook handler:
     {
       "phone": "2348021234567",
       "waJid": "2348021234567@s.whatsapp.net",
-      "telegramId": "123456789",
-      "telegramChatId": "123456789",
+      "telegramPhone": "2348021234567",
       "name": "Ada",
-      "history": [{ "role": "user", "content": "hi", "at": "..." }]
+      "history": [{ "role": "user", "content": "hi", "at": "2026-01-01T00:00:00.000Z" }]
     }
   ]
 }
 ```
 
-- `normalizePhone` strips `+`, spaces and dashes, and converts a leading `0` to `234` (`0802...` → `234802...`).
-- A WhatsApp message from `2348021234567@s.whatsapp.net` creates/updates the user keyed by `2348021234567`.
-- A Telegram message is matched by the sender's phone number, so the same number on both apps is **one user with one shared history** (last 20 messages).
-- Telegram only exposes a sender's phone if that person is in the logged-in account's contacts (or their privacy allows it). If the phone is unavailable, the Telegram user id is used as the identifier — add the person to the account's contacts if you need cross-platform linking.
-- `GET /users` lists linked users.
+`phone` is the key. A WhatsApp message from `2348021234567@s.whatsapp.net` and a Telegram login for `2348021234567` resolve to the same record, so the agent keeps one 20-message history across both platforms.
 
-## 5. Run locally
+## Endpoints
 
-```bash
-npm install
-cp .env.example .env   # then edit .env
-npm start
-```
-
-Open http://localhost:3000 — it returns status, model names and links.
-
-## 6. Endpoints
-
-| Method | Path | Description |
+| Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/` | Status + links |
+| GET | `/` | Service info and links |
 | GET | `/health` | Health check (used by Render) |
-| POST | `/webhook/evolution` | Evolution API webhook |
-| GET | `/auth/telegram` | Login instructions and status |
-| POST | `/auth/telegram/send-code` | Request a Telegram login code |
-| POST | `/auth/telegram/verify-code` | Submit code (and 2FA password) → session string |
-| GET | `/users` | Linked users summary |
+| POST | `/telegram/send-code` | Send a Telegram login code |
+| POST | `/telegram/verify-code` | Verify code (+ 2FA password if needed), save session |
+| GET | `/telegram/sessions` | List phones with saved sessions |
+| POST | `/telegram/logout` | Delete a phone's session and disconnect it |
+| POST | `/instance/create` | Create a WhatsApp instance and get its QR |
+| POST | `/webhook/evolution` | Evolution `MESSAGES_UPSERT` webhook |
+| GET | `/users` | List linked users and message counts |
 
-## 7. Deploy on Render
+## Deploy on Render
 
-**Option A — Blueprint**
+1. Render -> **New -> Blueprint** -> select this repository (`render.yaml` is read automatically).
+2. Add `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `GROQ_API_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` in **Environment**.
+3. Create/scan the WhatsApp instance and set its webhook to `https://YOUR-APP.onrender.com/webhook/evolution`.
+4. Log in Telegram per user with `/telegram/send-code` then `/telegram/verify-code` on the deployed URL.
 
-1. Push this repo to GitHub.
-2. Render dashboard → **New → Blueprint** → pick the repo. `render.yaml` defines the web service (`npm install` / `npm start`, health check `/health`).
-3. Fill in the secret env vars when prompted (they are marked `sync: false`).
-4. Deploy, then do the Telegram login flow against the public URL and add `TELEGRAM_SESSION`; Render redeploys automatically when you save it.
+## Limitations
 
-**Option B — Manual**
-
-1. Render → **New → Web Service** → connect the repo.
-2. Runtime **Node**, Build Command `npm install`, Start Command `npm start`.
-3. Add all env vars from `.env.example` under **Environment**.
-4. Deploy, then set the Evolution webhook to `https://YOUR-APP.onrender.com/webhook/evolution`.
-5. Visit `https://YOUR-APP.onrender.com/auth/telegram` to complete the Telegram login and copy the session into `TELEGRAM_SESSION`.
-
-Notes:
-
-- Render provides `PORT`; the app listens on `0.0.0.0`.
-- Free instances sleep when idle (the first webhook may be slow) and the filesystem is ephemeral, so `users.json` resets on redeploy/restart. For durable history, attach a Render disk and keep `users.json` on it, or move the store to a database.
-- `TELEGRAM_SESSION` must be stored as a secret env var so the Telegram account stays logged in across restarts.
+- **Sessions are on disk.** `telegram_sessions.json` and `users.json` live in the service filesystem. Render's free tier has an ephemeral disk, so a redeploy or restart wipes them - users must log in again and history resets. Attach a persistent disk (paid plans) or point these files at a mounted volume for durable sessions.
+- **Phone visibility.** Telegram only reveals a sender's phone number when that person is in the account's contacts; otherwise the numeric user ID is used for logging.
+- **The login endpoints are open.** Anyone who can reach `/telegram/send-code` can start a login and `/telegram/logout` can remove any phone's session. Put these behind auth before public use.
+- **One session per phone.** Logging in the same phone again replaces its stored session; the previous pending client is discarded.
+- WhatsApp linking depends on Evolution reporting the sender in `remoteJid`, which is standard for direct chats.
