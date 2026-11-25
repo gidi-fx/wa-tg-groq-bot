@@ -1,18 +1,12 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import axios from 'axios';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { askAgent, transcribeAudio, CHAT_MODEL, TRANSCRIBE_MODEL } from './agents.js';
-import {
-  normalizePhone,
-  getUserByWaJid,
-  getUserByPhone,
-  saveUser,
-  listUsers,
-} from './userStore.js';
+import { askAgent, CHAT_MODEL, TRANSCRIBE_MODEL } from './agents.js';
+import { listUsers } from './userStore.js';
+import { logError } from './logger.js';
 import {
   initTelegramClients,
   handleTelegramMessage,
@@ -23,12 +17,21 @@ import {
   exportSessions,
   sendCode,
   verifyCode,
-  getQR,
-  getQRStatus,
-  cancelQR,
   listSessions,
   logout,
 } from './telegramManager.js';
+import {
+  initWhatsAppClients,
+  handleEvolutionPayload,
+  sendWhatsAppMessage,
+  fetchInstances,
+  createInstance,
+  connectInstance,
+  evolutionConfigured,
+  getWhatsAppStatus,
+  WEBHOOK_URL,
+  EVOLUTION_INSTANCE,
+} from './whatsappManager.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -37,16 +40,24 @@ app.use(cors());
 app.use(express.json({ limit: '25mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Keep the last 50 log lines in memory so the dashboard can tail them.
+// Keep the last 100 log lines in memory so the dashboard can tail them.
 const LOG_LINES = [];
-const MAX_LOG_LINES = 50;
+const MAX_LOG_LINES = 100;
 for (const level of ['log', 'warn', 'error']) {
   const original = console[level].bind(console);
   console[level] = (...args) => {
     original(...args);
     try {
       const text = args
-        .map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg)))
+        .map((arg) => {
+          if (typeof arg === 'string') return arg;
+          if (arg instanceof Error) return `${arg.name}: ${arg.message}`;
+          try {
+            return JSON.stringify(arg);
+          } catch {
+            return String(arg);
+          }
+        })
         .join(' ')
         .slice(0, 400);
       LOG_LINES.push(`${new Date().toISOString()} ${level.toUpperCase()} ${text}`);
@@ -58,145 +69,6 @@ for (const level of ['log', 'warn', 'error']) {
 }
 
 const PORT = Number(process.env.PORT || 10000);
-const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').trim().replace(/[/]+$/, '');
-const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
-const evolutionHeaders = { apikey: EVOLUTION_API_KEY };
-
-function evolutionConfigured() {
-  return Boolean(EVOLUTION_API_URL && EVOLUTION_API_KEY);
-}
-
-async function fetchEvolutionInstances() {
-  if (!evolutionConfigured()) return { configured: false, instances: [] };
-  try {
-    const response = await axios.get(`${EVOLUTION_API_URL}/instance/fetchInstances`, {
-      headers: evolutionHeaders,
-      timeout: 10000,
-    });
-    const raw = Array.isArray(response.data) ? response.data : [];
-    const instances = raw.map((item) => {
-      const inner = item && item.instance && typeof item.instance === 'object' ? item.instance : {};
-      return {
-        name: item.name || item.instanceName || inner.instanceName || inner.name || 'unknown',
-        status: item.connectionStatus || item.status || inner.status || 'unknown',
-        profileName: item.profileName || inner.profileName || null,
-        number: item.owner || item.ownerJid || inner.owner || inner.ownerJid || null,
-      };
-    });
-    return { configured: true, instances };
-  } catch (err) {
-    console.error('[evolution] fetchInstances failed:', err.message);
-    return { configured: true, instances: [], error: err.message };
-  }
-}
-
-function instanceName(instance) {
-  const raw = String(instance || '').trim();
-  return encodeURIComponent(raw || 'any');
-}
-
-async function sendWhatsApp(instance, number, text) {
-  if (!evolutionConfigured()) throw new Error('Evolution API is not configured');
-  const response = await axios.post(
-    `${EVOLUTION_API_URL}/message/sendText/${instanceName(instance)}`,
-    { number, text },
-    { headers: evolutionHeaders, timeout: 30000 },
-  );
-  return response.data;
-}
-
-function unwrapMessage(message) {
-  if (!message || typeof message !== 'object') return {};
-  if (message.ephemeralMessage && message.ephemeralMessage.message) {
-    return unwrapMessage(message.ephemeralMessage.message);
-  }
-  if (message.viewOnceMessage && message.viewOnceMessage.message) {
-    return unwrapMessage(message.viewOnceMessage.message);
-  }
-  if (message.viewOnceMessageV2 && message.viewOnceMessageV2.message) {
-    return unwrapMessage(message.viewOnceMessageV2.message);
-  }
-  return message;
-}
-
-function extractText(message) {
-  if (!message) return '';
-  const candidates = [
-    message.conversation,
-    message.extendedTextMessage && message.extendedTextMessage.text,
-    message.imageMessage && message.imageMessage.caption,
-    message.videoMessage && message.videoMessage.caption,
-    message.documentMessage && message.documentMessage.caption,
-  ];
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
-  }
-  return '';
-}
-
-async function downloadEvolutionAudio(instance, rawMessage) {
-  if (!evolutionConfigured()) return null;
-  const response = await axios.post(
-    `${EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${instanceName(instance)}`,
-    { message: rawMessage },
-    { headers: evolutionHeaders, timeout: 60000 },
-  );
-  const payload = response.data || {};
-  const raw =
-    payload.base64 ||
-    (payload.data && payload.data.base64) ||
-    payload.media ||
-    (payload.data && payload.data.media);
-  if (!raw || typeof raw !== 'string') return null;
-  const base64 = raw.startsWith('data:') ? raw.slice(raw.indexOf(',') + 1) : raw;
-  const buffer = Buffer.from(base64, 'base64');
-  return buffer.length ? buffer : null;
-}
-
-async function handleEvolutionPayload(payload, instance) {
-  if (!payload || typeof payload !== 'object') return;
-
-  const eventName = String(payload.event || payload.type || '').toLowerCase();
-  if (eventName && !eventName.includes('messages.upsert')) return;
-
-  const data = payload.data && typeof payload.data === 'object' ? payload.data : payload;
-  const key = data.key || {};
-  if (key.fromMe) return;
-
-  const remoteJid = String(key.remoteJid || '');
-  if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid.includes('status@broadcast')) {
-    return;
-  }
-
-  const phone = normalizePhone(remoteJid.split('@')[0]);
-  if (!phone) return;
-
-  const rawMessage = data.message || {};
-  const message = unwrapMessage(rawMessage);
-  let text = extractText(message);
-  let source = 'text';
-
-  if (!text && message.audioMessage) {
-    const buffer = await downloadEvolutionAudio(instance, rawMessage);
-    if (buffer) {
-      text = await transcribeAudio(buffer, 'whatsapp-audio.ogg');
-      source = 'voice';
-    }
-  }
-
-  if (!text) return;
-
-  const existing = getUserByWaJid(remoteJid) || getUserByPhone(phone);
-  const user = saveUser({
-    phone: existing && existing.phone ? existing.phone : phone,
-    waJid: remoteJid,
-    name: data.pushName || undefined,
-  });
-
-  console.log(`[whatsapp] ${user.phone} via ${instance || 'any'} (${source}): ${text}`);
-  const reply = await askAgent(user.phone, text, 'whatsapp');
-  await sendWhatsApp(instance, user.phone, reply);
-}
 
 /* ---------------------------------- routes ---------------------------------- */
 
@@ -206,21 +78,16 @@ app.get('/', (req, res) => {
 
 app.get('/api/status', async (req, res) => {
   const backup = hasSessions() ? exportSessions() : null;
+  const telegram = getTelegramStatus();
+  const whatsapp = getWhatsAppStatus();
+  const evolution = await fetchInstances();
 
   res.json({
     status: 'ok',
     service: 'wa-tg-groq-bot',
     multiUser: true,
     uptime: Math.round(process.uptime()),
-    // On Render's free tier the disk is wiped on redeploy: copy this base64 into
-    // Environment > TELEGRAM_SESSIONS_JSON so sessions are restored on boot.
-    envBackup: backup
-      ? {
-          envVar: 'TELEGRAM_SESSIONS_JSON',
-          value: backup.base64,
-          count: backup.count,
-        }
-      : { envVar: 'TELEGRAM_SESSIONS_JSON', value: null, count: 0 },
+    port: PORT,
     links: {
       health: '/health',
       users: '/users',
@@ -230,14 +97,40 @@ app.get('/api/status', async (req, res) => {
       telegramVerifyCode: '/telegram/verify-code',
       telegramSessions: '/telegram/sessions',
       telegramLogout: '/telegram/logout',
-      telegramQr: '/telegram/qr',
-      telegramQrStatus: '/telegram/qr-status',
       telegramDebug: '/telegram/debug',
     },
-    telegram: getTelegramStatus(),
+    whatsapp: {
+      configured: whatsapp.configured,
+      total: whatsapp.total,
+      active: whatsapp.active,
+      instanceFromEnv: whatsapp.instanceFromEnv,
+      webhookUrl: whatsapp.webhookUrl,
+      instances: whatsapp.instances,
+      lastInitAt: whatsapp.lastInitAt,
+      lastInitError: whatsapp.lastInitError,
+    },
+    telegram: {
+      configured: telegram.configured,
+      apiId: telegram.apiId,
+      total: telegram.total,
+      active: telegram.active,
+      pendingLogins: telegram.pendingLogins,
+      sessions: telegram.sessions,
+    },
+    evolution: {
+      configured: evolution.configured,
+      count: evolution.instances.length,
+      instances: evolution.instances,
+      error: evolution.error || null,
+    },
+    evolutionConfigured: evolution.configured,
+    evolutionInstanceCount: evolution.instances.length,
     telegramSessionsFromEnv: getSessionLoadInfo(),
-    evolutionConfigured: evolutionConfigured(),
-    evolution: await fetchEvolutionInstances(),
+    // On Render's free tier the disk is wiped on redeploy: copy this base64 into
+    // Environment > TELEGRAM_SESSIONS_JSON so sessions are restored on boot.
+    envBackup: backup
+      ? { envVar: 'TELEGRAM_SESSIONS_JSON', value: backup.base64, count: backup.count }
+      : { envVar: 'TELEGRAM_SESSIONS_JSON', value: null, count: 0 },
     models: { chat: CHAT_MODEL, transcription: TRANSCRIBE_MODEL },
   });
 });
@@ -247,11 +140,14 @@ app.get('/logs', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
+  const telegram = getTelegramStatus();
+  const whatsapp = getWhatsAppStatus();
   res.json({
     ok: true,
     uptime: process.uptime(),
-    evolutionConfigured: evolutionConfigured(),
-    telegram: getTelegramStatus(),
+    port: PORT,
+    whatsapp: { configured: whatsapp.configured, total: whatsapp.total, active: whatsapp.active },
+    telegram: { configured: telegram.configured, total: telegram.total, active: telegram.active },
   });
 });
 
@@ -269,13 +165,13 @@ app.post('/telegram/send-code', async (req, res) => {
       success: true,
     });
   } catch (err) {
-    const detail = err && (err.errorMessage || err.message) ? err.errorMessage || err.message : String(err);
-    console.error(`[telegram] send-code failed for ${body.phone || '(no phone)'}:`, detail);
+    logError(`[telegram] send-code failed for ${body.phone || '(no phone)'}`, err);
     res.status(400).json({
       success: false,
       phone: body.phone || null,
-      error: detail,
-      errorMessage: (err && err.errorMessage) || null,
+      error: err.errorMessage || err.message || String(err),
+      errorMessage: err.errorMessage || null,
+      code: err.code || null,
       hint: 'Check TELEGRAM_API_ID / TELEGRAM_API_HASH are valid and the number uses international format',
     });
   }
@@ -302,52 +198,15 @@ app.post('/telegram/verify-code', async (req, res) => {
 
     res.json(result);
   } catch (err) {
-    const detail = err && (err.errorMessage || err.message) ? err.errorMessage || err.message : String(err);
-    console.error(`[telegram] verify-code failed for ${body.phone || '(no phone)'}:`, detail);
+    logError(`[telegram] verify-code failed for ${body.phone || '(no phone)'}`, err);
     res.status(400).json({
       success: false,
       phone: body.phone || null,
-      error: detail,
-      errorMessage: (err && err.errorMessage) || null,
+      error: err.errorMessage || err.message || String(err),
+      errorMessage: err.errorMessage || null,
+      code: err.code || null,
     });
   }
-});
-
-/* ------------------------------ Telegram QR login ---------------------------- */
-
-app.get('/telegram/qr', async (req, res) => {
-  try {
-    const password = req.query.password ? String(req.query.password) : undefined;
-    const result = await getQR(password);
-    res.json(result);
-  } catch (err) {
-    const detail = err && (err.errorMessage || err.message) ? err.errorMessage || err.message : String(err);
-    console.error('[telegram] qr failed:', detail);
-    res.status(400).json({ success: false, status: 'error', error: detail });
-  }
-});
-
-app.get('/telegram/qr-status', async (req, res) => {
-  try {
-    // ?password= supplies the 2FA password when status is "password-needed".
-    if (req.query.password && getQRStatus().status === 'password-needed') {
-      const result = await getQR(String(req.query.password));
-      return res.json(result);
-    }
-    res.json(getQRStatus());
-  } catch (err) {
-    const detail = err && (err.errorMessage || err.message) ? err.errorMessage || err.message : String(err);
-    console.error('[telegram] qr-status failed:', detail);
-    res.status(400).json({ success: false, status: 'error', error: detail });
-  }
-});
-
-app.post('/telegram/qr-cancel', async (req, res) => {
-  res.json(await cancelQR());
-});
-
-app.get('/telegram/debug', (req, res) => {
-  res.json({ ok: true, ...getDebugInfo(), status: getTelegramStatus() });
 });
 
 app.get('/telegram/sessions', (req, res) => {
@@ -361,70 +220,67 @@ app.post('/telegram/logout', async (req, res) => {
     const result = await logout(body.phone);
     res.json(result);
   } catch (err) {
-    console.error('[telegram] logout failed:', err.message);
+    logError('[telegram] logout failed', err);
     res.status(400).json({ success: false, error: err.message });
   }
 });
 
+app.get('/telegram/debug', (req, res) => {
+  res.json({
+    ok: true,
+    port: PORT,
+    telegram: getDebugInfo(),
+    whatsapp: getWhatsAppStatus(),
+    status: getTelegramStatus(),
+  });
+});
+
 /* --------------------------------- WhatsApp --------------------------------- */
+
+app.get('/webhook/evolution', (req, res) => {
+  res.json({
+    ok: true,
+    webhook: WEBHOOK_URL,
+    instanceFromEnv: EVOLUTION_INSTANCE || null,
+    whatsapp: getWhatsAppStatus(),
+    hint: 'Point Evolution API webhooks here: POST /webhook/set/{instance} with this URL',
+  });
+});
+
+app.post('/webhook/evolution', (req, res) => {
+  const body = req.body || {};
+  const instance =
+    body.instance || body.instanceName || req.query.instance || EVOLUTION_INSTANCE || 'any';
+
+  // Answer Evolution immediately so it never retries a slow Groq call.
+  res.json({ ok: true });
+
+  handleEvolutionPayload(body, instance).catch((err) => {
+    logError('[whatsapp] webhook handler failed', err);
+  });
+});
 
 app.post('/instance/create', async (req, res) => {
   try {
-    if (!evolutionConfigured()) throw new Error('Evolution API is not configured');
     const body = req.body || {};
     const name = String(body.instanceName || body.name || '').trim();
-    if (!name) {
-      return res.status(400).json({ success: false, error: 'instanceName is required' });
-    }
-
-    const response = await axios.post(
-      `${EVOLUTION_API_URL}/instance/create`,
-      { instanceName: name, qrcode: true, integration: 'WHATSAPP-BAILEYS' },
-      { headers: evolutionHeaders, timeout: 30000 },
-    );
-
-    res.json({ success: true, instance: name, evolution: response.data });
+    if (!name) return res.status(400).json({ success: false, error: 'instanceName is required' });
+    const result = await createInstance(name);
+    res.json({ success: true, instance: result.instance, webhook: WEBHOOK_URL, evolution: result.evolution });
   } catch (err) {
-    console.error('[evolution] instance/create failed:', err.message);
+    logError('[whatsapp] instance/create failed', err);
     res.status(400).json({ success: false, error: err.message });
   }
 });
 
 app.get('/instance/connect', async (req, res) => {
   try {
-    if (!evolutionConfigured()) throw new Error('Evolution API is not configured');
-    const name = String(req.query.instance || '').trim();
-    if (!name) return res.status(400).json({ success: false, error: 'instance is required' });
-
-    const response = await axios.get(
-      `${EVOLUTION_API_URL}/instance/connect/${instanceName(name)}`,
-      { headers: evolutionHeaders, timeout: 20000 },
-    );
-    const data = response.data || {};
-    const qr = data.qrcode && typeof data.qrcode === 'object' ? data.qrcode : {};
-
-    res.json({
-      success: true,
-      instance: name,
-      state: data.state || data.instance?.state || null,
-      base64: qr.base64 || data.base64 || null,
-      pairingCode: qr.pairingCode || data.pairingCode || null,
-    });
+    const data = await connectInstance(req.query.instance);
+    res.json({ success: true, ...data });
   } catch (err) {
-    console.error('[evolution] instance/connect failed:', err.message);
+    logError('[whatsapp] instance/connect failed', err);
     res.status(400).json({ success: false, error: err.message });
   }
-});
-
-app.post('/webhook/evolution', (req, res) => {
-  const body = req.body || {};
-  const instance = body.instance || req.query.instance || 'any';
-
-  res.json({ ok: true });
-
-  handleEvolutionPayload(body, instance).catch((err) => {
-    console.error('[whatsapp] handler error:', err.message);
-  });
 });
 
 app.get('/users', (req, res) => {
@@ -436,45 +292,46 @@ app.use((req, res) => {
   res.status(404).json({ ok: false, error: 'Not found' });
 });
 
+/* ---------------------------------- startup --------------------------------- */
+
 process.on('unhandledRejection', (reason) => {
-  console.error('[server] unhandled rejection:', reason);
+  logError('[server] unhandled rejection', reason instanceof Error ? reason : new Error(String(reason)));
 });
 
-async function checkEvolution() {
-  if (!evolutionConfigured()) {
-    console.warn('[evolution] missing EVOLUTION_API_URL / EVOLUTION_API_KEY - WhatsApp disabled');
-    return;
-  }
-  try {
-    const response = await axios.get(`${EVOLUTION_API_URL}/instance/fetchInstances`, {
-      headers: evolutionHeaders,
-      timeout: 15000,
-    });
-    const instances = Array.isArray(response.data) ? response.data : [];
-    console.log(`[evolution] connected, ${instances.length} instance(s) found`);
-  } catch (err) {
-    console.error('[evolution] connection check failed:', err.message);
-  }
+/** Groq reply + Evolution send, used as the WhatsApp message handler. */
+async function handleWhatsAppMessage({ instance, phone, text }) {
+  const reply = await askAgent(phone, text, 'whatsapp');
+  await sendWhatsAppMessage(instance, phone, reply);
+  console.log(`[whatsapp] replied to ${phone}: ${reply.slice(0, 120)}`);
+  return reply;
 }
 
 async function start() {
+  console.log(`[server] starting wa-tg-groq-bot on PORT=${PORT} (process.env.PORT=${process.env.PORT || 'unset'})`);
+
   const loadInfo = getSessionLoadInfo();
   console.log(
     `Loaded ${loadInfo.fromEnv} sessions from ENV, ${loadInfo.fromFile} from file (${loadInfo.total} total)`,
   );
   console.log(`[models] chat=${CHAT_MODEL} transcription=${TRANSCRIBE_MODEL}`);
+  console.log(`[whatsapp] webhook target ${WEBHOOK_URL}`);
 
-  // Activate every saved session and attach its message handler before listening.
+  // Both platforms must be active before the server accepts traffic.
   await initTelegramClients(handleTelegramMessage);
+  await initWhatsAppClients(handleWhatsAppMessage);
 
-  app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`wa-tg-groq-bot listening on 0.0.0.0:${PORT}`);
-    console.log(`[telegram] active clients: ${JSON.stringify(getDebugInfo().activeClients)}`);
-    await checkEvolution();
+  app.listen(PORT, '0.0.0.0', () => {
+    const telegram = getTelegramStatus();
+    const whatsapp = getWhatsAppStatus();
+    console.log(`[server] listening on 0.0.0.0:${PORT}`);
+    console.log(
+      `[server] ACTIVE clients -> telegram=${telegram.active}/${telegram.total} whatsapp=${whatsapp.active}/${whatsapp.total}`,
+    );
+    console.log(`[server] Telegram webhook? no - MTProto. WhatsApp webhook: ${WEBHOOK_URL}`);
   });
 }
 
 start().catch((err) => {
-  console.error('[server] startup failed:', err && err.stack ? err.stack : err);
+  logError('[server] startup failed', err);
   process.exit(1);
 });
