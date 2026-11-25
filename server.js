@@ -14,6 +14,9 @@ import {
 import {
   initSessions,
   getTelegramStatus,
+  getSessionLoadInfo,
+  hasSessions,
+  exportSessions,
   sendCode,
   verifyCode,
   listSessions,
@@ -144,10 +147,21 @@ async function handleEvolutionPayload(payload, instance) {
 /* ---------------------------------- routes ---------------------------------- */
 
 app.get('/', (req, res) => {
+  const backup = hasSessions() ? exportSessions() : null;
+
   res.json({
     status: 'ok',
     service: 'wa-tg-groq-bot',
     multiUser: true,
+    // On Render's free tier the disk is wiped on redeploy: copy this base64 into
+    // Environment > TELEGRAM_SESSIONS_JSON so sessions are restored on boot.
+    envBackup: backup
+      ? {
+          envVar: 'TELEGRAM_SESSIONS_JSON',
+          value: backup.base64,
+          count: backup.count,
+        }
+      : { envVar: 'TELEGRAM_SESSIONS_JSON', value: null, count: 0 },
     links: {
       health: '/health',
       users: '/users',
@@ -159,6 +173,7 @@ app.get('/', (req, res) => {
       telegramLogout: '/telegram/logout',
     },
     telegram: getTelegramStatus(),
+    telegramSessionsFromEnv: getSessionLoadInfo(),
     evolutionConfigured: evolutionConfigured(),
     models: { chat: CHAT_MODEL, transcription: TRANSCRIBE_MODEL },
   });
@@ -195,6 +210,18 @@ app.post('/telegram/verify-code', async (req, res) => {
       phoneCodeHash: body.phoneCodeHash,
       password: body.password,
     });
+
+    if (result && result.success && result.sessionSaved) {
+      const { base64 } = exportSessions();
+      console.log('=== PERSIST THIS TO RENDER ENV ===');
+      console.log('TELEGRAM_SESSIONS_JSON=' + base64);
+      console.log('=== END ===');
+      result.session = result.session || '';
+      result.envValue = base64;
+      result.instruction =
+        'Copy this base64 to Render env TELEGRAM_SESSIONS_JSON to survive redeploys';
+    }
+
     res.json(result);
   } catch (err) {
     console.error('[telegram] verify-code failed:', err.message);
@@ -286,6 +313,16 @@ async function checkEvolution() {
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`wa-tg-groq-bot listening on 0.0.0.0:${PORT}`);
   console.log(`[models] chat=${CHAT_MODEL} transcription=${TRANSCRIBE_MODEL}`);
+
+  const loadInfo = getSessionLoadInfo();
+  if (loadInfo.fromEnv > 0) {
+    console.log(`Loaded ${loadInfo.fromEnv} sessions from ENV`);
+  } else if (loadInfo.total > 0) {
+    console.log(`Loaded ${loadInfo.total} sessions from file (TELEGRAM_SESSIONS_JSON not set)`);
+  } else {
+    console.log('Loaded 0 sessions from ENV');
+  }
+
   await checkEvolution();
   await initSessions();
 });
