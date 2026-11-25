@@ -6,14 +6,36 @@ import Groq from 'groq-sdk';
 
 import { getHistory, addMessage } from './userStore.js';
 
-export const CHAT_MODEL = process.env.GROQ_CHAT_MODEL || 'qwen/qwen3-32b';
+export const CHAT_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 export const TRANSCRIBE_MODEL = process.env.GROQ_TRANSCRIBE_MODEL || 'whisper-large-v3';
+
+// Free Groq models, tried in order. The last one is the long-standing stable text model.
+const FALLBACK_MODELS = ['openai/gpt-oss-20b', 'llama-3.3-70b-versatile'];
+
+function modelChain(preferred) {
+  const chain = [preferred, ...FALLBACK_MODELS].filter(Boolean);
+  return chain.filter((model, index) => chain.indexOf(model) === index);
+}
+
+function isModelGone(err) {
+  const text = String((err && (err.message || err.errorMessage)) || err || '').toLowerCase();
+  return text.includes('model_not_found')
+    || text.includes('decommissioned')
+    || text.includes('does not exist')
+    || text.includes('no longer supported')
+    || text.includes('invalid_model');
+}
 
 let groqClient = null;
 
 function getGroq() {
   if (!process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY is not set');
-  if (!groqClient) groqClient = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  if (!groqClient) {
+    groqClient = new Groq({
+      apiKey: process.env.GROQ_API_KEY,
+      ...(process.env.GROQ_BASE_URL ? { baseURL: process.env.GROQ_BASE_URL } : {}),
+    });
+  }
   return groqClient;
 }
 
@@ -52,12 +74,33 @@ export async function askAgent(phone, userText, platform = 'whatsapp') {
     { role: 'user', content: text },
   ];
 
-  const completion = await groq.chat.completions.create({
-    model: CHAT_MODEL,
-    messages,
-    temperature: 0.7,
-    max_tokens: 512,
-  });
+  const models = modelChain(CHAT_MODEL);
+  let completion = null;
+  let lastError = null;
+
+  for (const model of models) {
+    try {
+      console.log(`[groq] using free model ${model}`);
+      completion = await groq.chat.completions.create({
+        model,
+        messages,
+        temperature: 0.7,
+        max_tokens: 512,
+      });
+      break;
+    } catch (err) {
+      lastError = err;
+      const detail = (err && (err.errorMessage || err.message)) || String(err);
+      console.log(`[groq] model ${model} failed: ${detail}${isModelGone(err) ? ' (model unavailable, trying next)' : ''}`);
+    }
+  }
+
+  if (!completion) {
+    if (lastError) {
+      throw new Error(`All Groq models failed (${models.join(', ')}): ${(lastError && (lastError.errorMessage || lastError.message)) || lastError}`);
+    }
+    throw new Error('Groq returned no completion');
+  }
 
   let reply = stripThinking(completion.choices && completion.choices[0] && completion.choices[0].message
     ? completion.choices[0].message.content

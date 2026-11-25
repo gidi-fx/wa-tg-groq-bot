@@ -5,7 +5,7 @@ WhatsApp (Evolution API) and Telegram (MTProto user login) bridge with Groq agen
 - **No bot.** No bot token, no Telegraf. Telegram runs as real user accounts over MTProto.
 - **Multi-user Telegram.** One `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` for the whole app; every user logs in with their own phone number and login code.
 - **No instance name in env.** WhatsApp instances are created on demand and taken from the webhook payload.
-- **Voice notes** are transcribed with Groq `whisper-large-v3`; replies come from Groq `qwen/qwen3-32b`.
+- **Voice notes** are transcribed with Groq `whisper-large-v3`; replies come from the free Groq model in `GROQ_MODEL` (default `openai/gpt-oss-120b`, falling back to `openai/gpt-oss-20b` and then `llama-3.3-70b-versatile`).
 - **Phone linking.** WhatsApp and Telegram with the same phone number share one user record and one conversation history.
 
 ## Environment
@@ -15,6 +15,7 @@ PORT=10000
 EVOLUTION_API_URL=https://your-evolution-host
 EVOLUTION_API_KEY=your-evolution-api-key
 GROQ_API_KEY=your-groq-api-key
+GROQ_MODEL=openai/gpt-oss-120b
 TELEGRAM_API_ID=1234567
 TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
 # Optional: public webhook Evolution calls (default below)
@@ -164,7 +165,7 @@ Text, captions and voice notes are supported. Group JIDs (`@g.us`) and status br
 ## Deploy on Render
 
 1. Render -> **New -> Blueprint** -> select this repository (`render.yaml` is read automatically).
-2. Add `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `GROQ_API_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` in **Environment**.
+2. Add `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `GROQ_API_KEY`, `GROQ_MODEL`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` in **Environment**.
 3. Create/scan the WhatsApp instance and set its webhook to `https://YOUR-APP.onrender.com/webhook/evolution`.
 4. Log in Telegram per user with `/telegram/send-code` then `/telegram/verify-code` on the deployed URL.
 
