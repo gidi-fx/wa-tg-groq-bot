@@ -2,7 +2,6 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import QRCode from 'qrcode';
 
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
@@ -10,6 +9,7 @@ import { NewMessage } from 'telegram/events/index.js';
 import { computeCheck } from 'telegram/Password.js';
 
 import { askAgent, transcribeAudio } from './agents.js';
+import { logError } from './logger.js';
 import { normalizePhone, saveUser } from './userStore.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -445,12 +445,22 @@ export async function sendCode(phone) {
 
   await dropPending(normalized);
 
-  console.log(`[telegram] sendCode: connecting fresh client for ${normalized} (apiId=${API_ID})`);
+  console.log(
+    `[telegram] sendCode: phone=${normalized} apiId=${API_ID} (type=${typeof API_ID}) apiHash=${
+      API_HASH ? `${API_HASH.slice(0, 4)}...(${API_HASH.length} chars)` : 'MISSING'
+    }`,
+  );
   const client = new TelegramClient(new StringSession(''), API_ID, API_HASH, {
     connectionRetries: 5,
   });
-  await client.connect();
-  console.log(`[telegram] sendCode: connected, requesting code`);
+
+  try {
+    await client.connect();
+    console.log(`[telegram] sendCode: connected, requesting code`);
+  } catch (err) {
+    logError(`[telegram] sendCode CONNECT FAILED for ${normalized}`, err);
+    throw err;
+  }
 
   try {
     const sent = await client.sendCode({ apiId: API_ID, apiHash: API_HASH }, normalized);
@@ -476,7 +486,7 @@ export async function sendCode(phone) {
       message: 'Check Telegram app > Chat Telegram for code',
     };
   } catch (err) {
-    console.error(`[telegram] sendCode FAILED for ${normalized}:`, errorText(err));
+    logError(`[telegram] sendCode FAILED for ${normalized}`, err);
     try {
       await client.disconnect();
     } catch {
@@ -535,7 +545,7 @@ export async function verifyCode(phoneOrOptions, codeArg, phoneCodeHashArg, pass
     console.log(`[telegram] verifyCode: code accepted for ${normalized}`);
   } catch (err) {
     const errorMessage = errorText(err);
-    console.error(`[telegram] verifyCode: SignIn failed for ${normalized}:`, errorMessage);
+    logError(`[telegram] verifyCode SignIn failed for ${normalized}`, err);
 
     if (errorMessage !== 'SESSION_PASSWORD_NEEDED') {
       throw new Error(errorMessage);
@@ -553,10 +563,15 @@ export async function verifyCode(phoneOrOptions, codeArg, phoneCodeHashArg, pass
     }
 
     console.log(`[telegram] verifyCode: 2FA required for ${normalized}, checking password`);
-    const passwordInfo = await client.invoke(new Api.account.GetPassword());
-    const check = await computeCheck(passwordInfo, String(password));
-    await client.invoke(new Api.auth.CheckPassword({ password: check }));
-    console.log(`[telegram] verifyCode: 2FA password accepted for ${normalized}`);
+    try {
+      const passwordInfo = await client.invoke(new Api.account.GetPassword());
+      const check = await computeCheck(passwordInfo, String(password));
+      await client.invoke(new Api.auth.CheckPassword({ password: check }));
+      console.log(`[telegram] verifyCode: 2FA password accepted for ${normalized}`);
+    } catch (err) {
+      logError(`[telegram] verifyCode 2FA failed for ${normalized}`, err);
+      throw err;
+    }
   }
 
   const sessionString = client.session.save();
@@ -605,160 +620,6 @@ export async function verifyCode(phoneOrOptions, codeArg, phoneCodeHashArg, pass
     envValue: base64,
     instruction: 'Copy this base64 to Render env TELEGRAM_SESSIONS_JSON to survive redeploys',
   };
-}
-
-/* --------------------------------- QR login --------------------------------- */
-
-const qrState = {
-  status: 'idle',
-  url: null,
-  dataUrl: null,
-  expires: null,
-  phone: null,
-  error: null,
-  startedAt: null,
-};
-
-let qrClient = null;
-
-export function getQRStatus() {
-  return {
-    success: qrState.status === 'success',
-    status: qrState.status,
-    needsPassword: qrState.status === 'password-needed',
-    url: qrState.url,
-    qr: qrState.dataUrl,
-    expires: qrState.expires,
-    phone: qrState.phone,
-    error: qrState.error,
-    startedAt: qrState.startedAt,
-    activeClients: getActiveClientPhones(),
-  };
-}
-
-async function stopQR() {
-  const client = qrClient;
-  qrClient = null;
-  if (!client) return;
-  try {
-    await client.disconnect();
-  } catch {
-    /* ignore */
-  }
-}
-
-/**
- * Backup login: QR token via gramjs signInUserWithQrCode, rendered with the
- * qrcode library. Poll GET /telegram/qr-status until success (or password-needed).
- */
-export async function getQR(password) {
-  assertConfigured();
-
-  if (qrState.status === 'pending' && qrClient) {
-    return getQRStatus();
-  }
-
-  await stopQR();
-
-  const client = new TelegramClient(new StringSession(''), API_ID, API_HASH, {
-    connectionRetries: 5,
-  });
-  qrClient = client;
-
-  qrState.status = 'pending';
-  qrState.url = null;
-  qrState.dataUrl = null;
-  qrState.expires = null;
-  qrState.phone = null;
-  qrState.error = null;
-  qrState.startedAt = new Date().toISOString();
-
-  await client.connect();
-  const passwordValue = password ? String(password) : '';
-  console.log('[telegram] getQR: connected, requesting QR login token');
-
-  // signInUserWithQrCode blocks until the code is scanned, so run it in the background.
-  (async () => {
-    try {
-      await client.signInUserWithQrCode(
-        { apiId: API_ID, apiHash: API_HASH },
-        {
-          qrCode: async ({ token, expires }) => {
-            const url = `tg://login?token=${Buffer.from(token).toString('base64url')}`;
-            qrState.url = url;
-            qrState.dataUrl = await QRCode.toDataURL(url, { margin: 1, width: 320 });
-            qrState.expires = Number(expires) || null;
-            qrState.status = 'pending';
-            console.log(`[telegram] getQR: QR token ready (expires ${qrState.expires})`);
-          },
-          password: async () => {
-            if (!passwordValue) {
-              const err = new Error('SESSION_PASSWORD_NEEDED');
-              err.errorMessage = 'SESSION_PASSWORD_NEEDED';
-              throw err;
-            }
-            return passwordValue;
-          },
-          onError: (err) => {
-            const text = errorText(err);
-            console.error('[telegram] getQR: login error:', text);
-            if (text === 'SESSION_PASSWORD_NEEDED') {
-              qrState.status = 'password-needed';
-              qrState.error = null;
-            } else {
-              qrState.status = 'error';
-              qrState.error = text;
-            }
-            return true;
-          },
-        },
-      );
-
-      const sessionString = client.session.save();
-      let phone = 'default';
-      try {
-        const me = await client.getMe();
-        phone = sessionKey(me && me.phone) || 'default';
-      } catch (err) {
-        console.error('[telegram] getQR: getMe failed:', err.message);
-      }
-
-      saveSessionForPhone(phone, sessionString);
-      qrState.status = 'success';
-      qrState.phone = phone;
-      qrState.dataUrl = null;
-      console.log(`[telegram] getQR: login SUCCESS for ${phone}, session saved`);
-
-      await client.disconnect().catch(() => {});
-      if (qrClient === client) qrClient = null;
-
-      await initTelegramClients(storedMessageHandler).catch((err) => {
-        console.error('[telegram] getQR: initTelegramClients failed:', errorText(err));
-      });
-    } catch (err) {
-      const text = errorText(err);
-      if (qrState.status !== 'success') {
-        if (text === 'SESSION_PASSWORD_NEEDED') {
-          qrState.status = 'password-needed';
-        } else if (text !== 'AUTH_USER_CANCEL') {
-          qrState.status = 'error';
-          qrState.error = text;
-        }
-      }
-      console.error('[telegram] getQR: flow failed:', text);
-      await stopQR();
-    }
-  })();
-
-  return getQRStatus();
-}
-
-export async function cancelQR() {
-  await stopQR();
-  qrState.status = 'idle';
-  qrState.url = null;
-  qrState.dataUrl = null;
-  return getQRStatus();
 }
 
 /* ----------------------------------- usage ---------------------------------- */
@@ -845,10 +706,11 @@ export function getTelegramStatus() {
   return {
     configured: Boolean(API_ID && API_HASH),
     apiId: API_ID,
+    total: listSessions().length,
+    active: activeClients.size,
     sessions: listSessions(),
     pendingLogins: [...pendingCodes.keys()],
     activeClients: activeClients.size,
     activeClientPhones: getActiveClientPhones(),
-    qr: { status: qrState.status },
   };
 }
