@@ -11,12 +11,14 @@ WhatsApp (Evolution API) and Telegram (MTProto user login) bridge with Groq agen
 ## Environment
 
 ```bash
-PORT=3000
+PORT=10000
 EVOLUTION_API_URL=https://your-evolution-host
 EVOLUTION_API_KEY=your-evolution-api-key
 GROQ_API_KEY=your-groq-api-key
 TELEGRAM_API_ID=1234567
 TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
+# Optional: public webhook Evolution calls (default below)
+WEBHOOK_URL=https://wa-tg-groq-bot.onrender.com/webhook/evolution
 ```
 
 That is the complete list. There is **no** `EVOLUTION_INSTANCE`, no `TELEGRAM_PHONE`, and no `TELEGRAM_SESSION` to configure - sessions are created per user at login and stored in `telegram_sessions.json`.
