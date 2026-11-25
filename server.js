@@ -2,6 +2,8 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 import { askAgent, transcribeAudio, CHAT_MODEL, TRANSCRIBE_MODEL } from './agents.js';
 import {
@@ -23,9 +25,32 @@ import {
   logout,
 } from './telegramManager.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Keep the last 50 log lines in memory so the dashboard can tail them.
+const LOG_LINES = [];
+const MAX_LOG_LINES = 50;
+for (const level of ['log', 'warn', 'error']) {
+  const original = console[level].bind(console);
+  console[level] = (...args) => {
+    original(...args);
+    try {
+      const text = args
+        .map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg)))
+        .join(' ')
+        .slice(0, 400);
+      LOG_LINES.push(`${new Date().toISOString()} ${level.toUpperCase()} ${text}`);
+      if (LOG_LINES.length > MAX_LOG_LINES) LOG_LINES.splice(0, LOG_LINES.length - MAX_LOG_LINES);
+    } catch {
+      /* never let logging break the app */
+    }
+  };
+}
 
 const PORT = Number(process.env.PORT || 3000);
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').trim().replace(/[/]+$/, '');
@@ -34,6 +59,30 @@ const evolutionHeaders = { apikey: EVOLUTION_API_KEY };
 
 function evolutionConfigured() {
   return Boolean(EVOLUTION_API_URL && EVOLUTION_API_KEY);
+}
+
+async function fetchEvolutionInstances() {
+  if (!evolutionConfigured()) return { configured: false, instances: [] };
+  try {
+    const response = await axios.get(`${EVOLUTION_API_URL}/instance/fetchInstances`, {
+      headers: evolutionHeaders,
+      timeout: 10000,
+    });
+    const raw = Array.isArray(response.data) ? response.data : [];
+    const instances = raw.map((item) => {
+      const inner = item && item.instance && typeof item.instance === 'object' ? item.instance : {};
+      return {
+        name: item.name || item.instanceName || inner.instanceName || inner.name || 'unknown',
+        status: item.connectionStatus || item.status || inner.status || 'unknown',
+        profileName: item.profileName || inner.profileName || null,
+        number: item.owner || item.ownerJid || inner.owner || inner.ownerJid || null,
+      };
+    });
+    return { configured: true, instances };
+  } catch (err) {
+    console.error('[evolution] fetchInstances failed:', err.message);
+    return { configured: true, instances: [], error: err.message };
+  }
 }
 
 function instanceName(instance) {
@@ -147,12 +196,17 @@ async function handleEvolutionPayload(payload, instance) {
 /* ---------------------------------- routes ---------------------------------- */
 
 app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/api/status', async (req, res) => {
   const backup = hasSessions() ? exportSessions() : null;
 
   res.json({
     status: 'ok',
     service: 'wa-tg-groq-bot',
     multiUser: true,
+    uptime: Math.round(process.uptime()),
     // On Render's free tier the disk is wiped on redeploy: copy this base64 into
     // Environment > TELEGRAM_SESSIONS_JSON so sessions are restored on boot.
     envBackup: backup
@@ -175,8 +229,13 @@ app.get('/', (req, res) => {
     telegram: getTelegramStatus(),
     telegramSessionsFromEnv: getSessionLoadInfo(),
     evolutionConfigured: evolutionConfigured(),
+    evolution: await fetchEvolutionInstances(),
     models: { chat: CHAT_MODEL, transcription: TRANSCRIBE_MODEL },
   });
+});
+
+app.get('/logs', (req, res) => {
+  res.json({ ok: true, count: LOG_LINES.length, lines: LOG_LINES });
 });
 
 app.get('/health', (req, res) => {
@@ -265,6 +324,32 @@ app.post('/instance/create', async (req, res) => {
     res.json({ success: true, instance: name, evolution: response.data });
   } catch (err) {
     console.error('[evolution] instance/create failed:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/instance/connect', async (req, res) => {
+  try {
+    if (!evolutionConfigured()) throw new Error('Evolution API is not configured');
+    const name = String(req.query.instance || '').trim();
+    if (!name) return res.status(400).json({ success: false, error: 'instance is required' });
+
+    const response = await axios.get(
+      `${EVOLUTION_API_URL}/instance/connect/${instanceName(name)}`,
+      { headers: evolutionHeaders, timeout: 20000 },
+    );
+    const data = response.data || {};
+    const qr = data.qrcode && typeof data.qrcode === 'object' ? data.qrcode : {};
+
+    res.json({
+      success: true,
+      instance: name,
+      state: data.state || data.instance?.state || null,
+      base64: qr.base64 || data.base64 || null,
+      pairingCode: qr.pairingCode || data.pairingCode || null,
+    });
+  } catch (err) {
+    console.error('[evolution] instance/connect failed:', err.message);
     res.status(400).json({ success: false, error: err.message });
   }
 });
