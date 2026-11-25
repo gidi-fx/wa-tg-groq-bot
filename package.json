@@ -1,7 +1,7 @@
 {
   "name": "wa-tg-groq-bot",
-  "version": "1.0.0",
-  "description": "WhatsApp (Evolution API) + Telegram (MTProto phone login) bridge with Groq AI agents for text and voice",
+  "version": "2.0.0",
+  "description": "WhatsApp (Evolution API, per-instance) + Telegram MTProto multi-user phone login with Groq AI agents for text and voice",
   "type": "module",
   "main": "server.js",
   "scripts": {
