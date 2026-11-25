@@ -21,6 +21,15 @@ TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
 
 That is the complete list. There is **no** `EVOLUTION_INSTANCE`, no `TELEGRAM_PHONE`, and no `TELEGRAM_SESSION` to configure - sessions are created per user at login and stored in `telegram_sessions.json`.
 
+One optional variable exists for hosts with an ephemeral disk (Render free tier):
+
+```bash
+# Optional. Restores sessions after a redeploy. Fill it in AFTER the first login.
+TELEGRAM_SESSIONS_JSON=eyJzZXNzaW9ucyI6e319
+```
+
+`TELEGRAM_SESSION` (a single legacy session string) is still accepted and is loaded as `{ "default": "<session>" }`.
+
 ## Run locally
 
 ```bash
@@ -67,6 +76,20 @@ curl -X POST http://localhost:3000/telegram/verify-code \
 ```
 
 `{"success":true,"sessionSaved":true,...}` means the session was saved and the client is now listening for incoming messages. If the account has 2FA, the first response is `{"success":false,"needsPassword":true}`; repeat the same request with the extra field `"password":"your-2fa-password"`.
+
+The successful response also carries the backup value for ephemeral hosts:
+
+```json
+{
+  "success": true,
+  "sessionSaved": true,
+  "session": "1BVtsOK4Bu...",
+  "envValue": "eyJzZXNzaW9ucyI6eyIyMzQ4MDIxMjM0NTY3IjoiMUJWdHNPSzRCdSJ9fQ==",
+  "instruction": "Copy this base64 to Render env TELEGRAM_SESSIONS_JSON to survive redeploys"
+}
+```
+
+The same base64 is printed in the server log between `=== PERSIST THIS TO RENDER ENV ===` markers, and `GET /` exposes it under `envBackup`.
 
 ### 3. Manage sessions
 
@@ -143,9 +166,28 @@ Text, captions and voice notes are supported. Group JIDs (`@g.us`) and status br
 3. Create/scan the WhatsApp instance and set its webhook to `https://YOUR-APP.onrender.com/webhook/evolution`.
 4. Log in Telegram per user with `/telegram/send-code` then `/telegram/verify-code` on the deployed URL.
 
+### Keep sessions across redeploys (Render free tier)
+
+Render's free plan has an **ephemeral filesystem**: `telegram_sessions.json` and `users.json` are wiped on every redeploy or restart, so everyone would have to log in again.
+
+The session store survives that because it can be seeded from an environment variable:
+
+1. Log in once with `/telegram/send-code` then `/telegram/verify-code` on the deployed URL.
+2. Copy the base64 value from the response (`envValue`), from `GET /` (`envBackup.value`), or from the log line `TELEGRAM_SESSIONS_JSON=...`.
+3. In Render open your service -> **Environment** -> **Add Environment Variable**:
+   - Key: `TELEGRAM_SESSIONS_JSON`
+   - Value: the base64 you copied
+4. **Save** (this triggers a deploy). On boot the log shows `Loaded N sessions from ENV` and every saved account reconnects without logging in again.
+
+Details:
+
+- `TELEGRAM_SESSIONS_JSON` accepts **base64** (anything starting with `eyJ`) or a **raw JSON** string such as `{"sessions":{"2348021234567":"1BVts..."}}` (a flat `{"2348021234567":"1BVts..."}` map also works).
+- On startup the app loads ENV first, then fills any gaps from `telegram_sessions.json`, and rewrites the file so local development keeps working without the variable.
+- Every save logs the current value as `TELEGRAM_SESSIONS_JSON=...`, so after another user logs in you can repeat step 2-4 to update it. Sessions are credentials: keep the variable private and never commit it.
+
 ## Limitations
 
-- **Sessions are on disk.** `telegram_sessions.json` and `users.json` live in the service filesystem. Render's free tier has an ephemeral disk, so a redeploy or restart wipes them - users must log in again and history resets. Attach a persistent disk (paid plans) or point these files at a mounted volume for durable sessions.
+- **Sessions need the ENV backup on free hosts.** `telegram_sessions.json` and `users.json` live in the service filesystem, and Render's free tier has an ephemeral disk. Set `TELEGRAM_SESSIONS_JSON` (see above) to restore Telegram sessions after a redeploy; chat history in `users.json` still resets unless you attach a persistent disk.
 - **Phone visibility.** Telegram only reveals a sender's phone number when that person is in the account's contacts; otherwise the numeric user ID is used for logging.
 - **The login endpoints are open.** Anyone who can reach `/telegram/send-code` can start a login and `/telegram/logout` can remove any phone's session. Put these behind auth before public use.
 - **One session per phone.** Logging in the same phone again replaces its stored session; the previous pending client is discarded.
