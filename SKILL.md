@@ -71,14 +71,14 @@ Users can also save keys in **Settings** (stored in Supabase, or in memory) or p
 | GET | `/api/models` | Live-tested catalog (`groqAllowed` = the 2 Groq models) |
 | GET | `/api/openrouter/models` | Full OpenRouter catalog for the searchable picker |
 | POST | `/api/transcribe` | Groq Whisper STT (`file`, `audioBase64` or `audioUrl`) |
-| GET | `/api/instance/qr/:instance` | Latest QR / pairing code pushed by `qrcode.updated` |
+| GET | `/api/instance/qr/:instance` | Latest QR pushed by `qrcode.updated` (never a pairing code) |
 | GET/POST | `/api/agents` | List / create agents |
 | GET/PUT/DELETE | `/api/agents/:id` | Read / update / delete |
 | POST | `/api/agents/:id/media` | Upload media (max 20 MB, 10 files) |
 | DELETE | `/api/agents/:id/media?path=` | Remove a media file |
 | GET/PUT | `/api/settings` | Global BYOK keys (masked on read) |
 | POST | `/api/instance/create` | Create Evolution instance + webhook |
-| GET/POST | `/api/instance/connect/:instance` | QR base64 and/or pairing code (`POST { number }`) |
+| GET | `/api/instance/connect/:instance?number=` | `{ pairingCode }` or `{ qr }` fallback (one Evolution GET per press) |
 | GET | `/api/instance/status/:instance` | Connection status |
 | POST | `/webhook/:instance` | Evolution `messages.upsert` |
 | GET | `/api/inbox/conversations` | Chats grouped by JID |
@@ -112,9 +112,13 @@ Users can also save keys in **Settings** (stored in Supabase, or in memory) or p
 
 ## Pairing code (Evolution)
 
-- `connectInstance()` calls `POST /instance/connect/<instance>` with `{ "number": "234..." }` and only falls back to `GET ...?number=` when that fails. Older GET-only calls returned a QR with `pairingCode: null`.
-- Webhook events `qrcode.updated` and `connection.update` are no longer ignored: the app caches `pairingCode`/`base64` per instance, serves it on `GET /api/instance/qr/:instance` and reuses it in the connect response.
-- The Connect page has **Try Pairing Code Again** and polls the cached endpoint for ~36 s after each request.
+- `connectInstance()` calls only `GET /instance/connect/<instance>?number=<digits>` (country code, no `+`); `POST` 404s on Evolution v2.3.8. Exactly one call is made per button press.
+- Response order: `pairingCode` → `{ pairingCode }`; otherwise `base64` → `{ qr }`. `code` is the raw QR string, not the pairing code, so it is ignored.
+- Pairing codes may contain letters (`6DAQQ8N2`), so they are returned as-is and never digit-filtered.
+- `qrcode.updated` only carries QR data; the app caches its `base64` for the QR panel and never reads a pairing code from it.
+- The Connect page disables both buttons while the request runs and for 60 s afterwards, and does not auto-retry (a second connect call invalidates the first code).
+- `GET /instance/connectionState/<instance>` 404s for instances that do not exist yet; that is mapped to `state: not_found` and is not logged as an error.
+- The raw connect response is logged (credential fields redacted); the Evolution apikey is never logged.
 - Evolution env needed for pairing: `AUTH_TYPE=baileys`, `ENABLE_PAIRING_CODE=true`, `QRCODE_LIMIT=5`, `QRCODE_COLOR=#198754`, `CACHE_ENABLED=false`, `DATABASE_ENABLED=false` (memory).
 
 ## Notes
