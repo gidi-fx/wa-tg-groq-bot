@@ -255,14 +255,13 @@
       return '$' + Number(info.pricePer1k).toFixed(4) + '/1k tokens';
     }
 
-    /** Best default: the recommended free Groq model, else the first free one that replied. */
+    /** Best default: the first whitelisted Groq model (gpt-oss-120b). */
     function defaultModelId() {
       const groups = state.catalog.groups || { freeWorking: [] };
-      const preferred = ['groq/llama-3.3-70b-versatile', 'groq/llama-3.1-8b-instant'];
-      const hit = preferred.find((id) => groups.freeWorking.some((m) => m.id === id));
-      if (hit) return hit;
-      if (groups.freeWorking.length) return groups.freeWorking[0].id;
-      return 'groq/llama-3.1-8b-instant';
+      const whitelisted = ['groq/openai/gpt-oss-120b', 'groq/openai/gpt-oss-20b'];
+      const hit = groups.freeWorking.find((m) => whitelisted.includes(m.id));
+      if (hit) return hit.id;
+      return 'groq/openai/gpt-oss-120b';
     }
 
     /* ============================== layout ================================ */
