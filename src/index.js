@@ -453,24 +453,35 @@ app.get(
 );
 
 const createInstanceHandler = asyncRoute(async (req, res) => {
-  const name = String(req.body?.instanceName || req.body?.name || '').trim();
-  if (!name) throw new AppError('instanceName is required', 400, 'invalid_instance');
+  const rawName = String(req.body?.instanceName || req.body?.name || '').trim();
+  const number = req.body?.number ? digits(req.body.number) : '';
+  const name = rawName || (number ? evo.instanceNameForNumber(number) : '');
+  if (!name) throw new AppError('A WhatsApp number is required', 400, 'invalid_number');
   const webhookUrl = `${baseUrl(req)}/webhook/${encodeURIComponent(name)}`;
   const result = await evo.createInstance(name, webhookUrl);
   console.log(`[connect] instance ${name} created (webhook=${webhookUrl})`);
   res.status(201).json({ ok: true, ...result });
 });
 
+/** Instance names are derived from the phone number: wa-<digits>. */
 const connectInstanceHandler = asyncRoute(async (req, res) => {
-  const instance = req.params.instance;
-  const number = req.query.number ? digits(req.query.number) : null;
+  const number = digits(req.query.number || req.body?.number || '');
+  const instance = req.params.instance
+    ? String(req.params.instance).trim()
+    : (number ? evo.instanceNameForNumber(number) : '');
+  if (!instance) throw new AppError('A WhatsApp number is required', 400, 'invalid_number');
+
+  const webhookUrl = `${baseUrl(req)}/webhook/${encodeURIComponent(instance)}`;
+  const ensured = await evo.ensureInstance(instance, webhookUrl);
   const data = await evo.connectInstance(instance, number);
-  res.json({ ok: true, ...data });
+  res.json({ ok: true, ...data, created: ensured.created });
 });
 
 // Public aliases documented for Evolution-style integrations.
 app.post('/api/instance/create', createInstanceHandler);
 app.post('/instance/create', createInstanceHandler);
+app.post('/api/instance/connect', connectInstanceHandler);
+app.get('/api/instance/connect', connectInstanceHandler);
 app.get('/api/instance/connect/:instance', connectInstanceHandler);
 app.get('/instance/connect/:instance', connectInstanceHandler);
 
@@ -822,11 +833,21 @@ app.get(
 app.post(
   '/api/groups/sync',
   asyncRoute(async (req, res) => {
-    const instance = String(req.body?.instance || '').trim();
-    if (!instance) throw new AppError('instance is required', 400, 'invalid_instance');
+    let instance = String(req.body?.instance || '').trim();
+    const number = req.body?.number ? digits(req.body.number) : '';
+    if (!instance && number) instance = evo.instanceNameForNumber(number);
+    if (!instance) {
+      const instances = await evo.fetchInstances().catch(() => []);
+      instance = instances.find((item) => /open|connected/i.test(String(item.status)))?.name
+        || instances[0]?.name
+        || String(process.env.EVOLUTION_INSTANCE || '').trim();
+    }
+    if (!instance) throw new AppError('Connect a WhatsApp number first', 409, 'no_instance');
+
     const groups = await evo.fetchGroups(instance);
     await upsertGroups(groups);
     console.log(`[groups] synced ${groups.length} groups from ${instance}`);
+    const saved = await listGroups();
 
     if (!isSupabaseConfigured()) {
       return res.json({
@@ -834,11 +855,12 @@ app.post(
         instance,
         hasSupabase: false,
         warning: MEMORY_WARNING,
+        groups: saved,
         data: memorySnapshot(),
       });
     }
 
-    res.json({ ok: true, instance, hasSupabase: true, groups: await listGroups() });
+    res.json({ ok: true, instance, hasSupabase: true, groups: saved });
   }),
 );
 
