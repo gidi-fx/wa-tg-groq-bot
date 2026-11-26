@@ -6,7 +6,9 @@
 create extension if not exists pgcrypto;
 
 -- ---------------------------------------------------------------------------
--- Agents (BYOK keys can be stored globally in settings or per agent here)
+-- Agents. connected_instance = the WhatsApp account (Evolution instance,
+-- e.g. wa-2348027899720) this agent replies from. API keys NEVER live here:
+-- Groq/OpenRouter keys are read from the server environment only.
 -- ---------------------------------------------------------------------------
 create table if not exists public.agents (
   id text primary key,
@@ -16,10 +18,13 @@ create table if not exists public.agents (
   media_enabled boolean not null default false,
   model text not null default 'groq/llama-3.3-70b-versatile',
   media_files jsonb not null default '[]'::jsonb,
-  groq_key text,
-  openrouter_key text,
+  connected_instance text,
   created_at timestamptz not null default now()
 );
+
+-- Existing installs created before connected_instance existed.
+alter table public.agents add column if not exists connected_instance text;
+-- Old BYOK columns (if any) are ignored by the app and left untouched.
 
 -- ---------------------------------------------------------------------------
 -- WhatsApp groups synced from Evolution

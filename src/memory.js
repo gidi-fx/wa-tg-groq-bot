@@ -10,7 +10,6 @@ export const mem = {
   inbox: [], // inbox message rows
   history: [], // [{ jid, role, content, timestamp }]
   media: new Map(), // object path -> { buffer, contentType }
-  settings: { groqKey: '', openrouterKey: '' },
 };
 
 export const MEMORY_WARNING =
@@ -28,11 +27,7 @@ export function memoryCounts() {
 /** JSON-safe snapshot of the temporary store (never exposes raw keys). */
 export function memorySnapshot() {
   return {
-    agents: [...mem.agents.values()].map(({ groq_key, openrouter_key, ...row }) => ({
-      ...row,
-      hasGroqKey: Boolean(groq_key),
-      hasOpenRouterKey: Boolean(openrouter_key),
-    })),
+    agents: [...mem.agents.values()].map((row) => ({ ...row })),
     groups: mem.groups.map((group) => ({
       ...group,
       agentId: mem.hosts.get(group.jid) || null,
