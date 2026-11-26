@@ -1,29 +1,48 @@
     /* -------------------------------- agents ------------------------------ */
     async function agentsPage(el) {
-      await Promise.all([loadAgents(), loadCatalog(), getConfig().catch(() => null)]);
+      await Promise.all([loadAgents(), loadCatalog(), loadInstances(), getConfig().catch(() => null)]);
       let mediaFiles = [];
+      let pollTimer = null;
+
+      function connectedInstances() {
+        return (state.instances || []).filter((item) => isInstanceConnected(item.status));
+      }
+
+      function accountOptionLabel(instance) {
+        const number = instanceNumber(instance.name) || String(instance.number || '').replace(/\D/g, '');
+        const state_ = String(instance.status || 'unknown');
+        return instance.name + ' (' + state_ + ')' + (number ? ' — ' + number : '');
+      }
+
+      function repliesViaLabel(agent) {
+        const number = agent.connectedNumber || instanceNumber(agent.connectedInstance) || '';
+        return number || agent.connectedInstance || 'not set';
+      }
 
       function renderList() {
         if (!state.agents.length) {
-          return '<div class="' + cardCls + ' p-10 text-center"><p class="text-2xl">✦</p><p class="mt-3 text-sm font-semibold">No agents yet</p><p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Create your first agent, pick a free model and give it instructions.</p><button id="empty-create" class="' + btnPrimary + ' mt-5">Create agent</button></div>';
+          return '<div class="' + cardCls + ' p-10 text-center"><p class="text-2xl">✦</p><p class="mt-3 text-sm font-semibold">No agents yet</p><p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Create your first agent, pick a model that really replies and choose the WhatsApp account it answers from.</p><button id="empty-create" class="' + btnPrimary + ' mt-5">Create agent</button></div>';
         }
         return '<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">' + state.agents.map((agent) =>
           '<div class="' + cardCls + ' flex flex-col p-5">'
           + '<div class="flex items-start justify-between gap-3"><div class="min-w-0"><h3 class="truncate text-sm font-bold">' + esc(agent.name) + '</h3><p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">' + esc(modelLabel(agent.model)) + '</p></div>' + modelBadge(agent.model) + '</div>'
           + '<p class="mt-3 line-clamp-3 min-h-[3rem] text-xs leading-relaxed text-slate-600 dark:text-slate-300">' + esc(agent.instruction || 'No instruction set.') + '</p>'
           + '<div class="mt-3 flex flex-wrap gap-1.5 text-[10px] font-semibold">'
+          + '<span class="rounded-md bg-emerald-500/10 px-1.5 py-0.5 text-emerald-600 dark:text-emerald-400">Replies via: ' + esc(repliesViaLabel(agent)) + '</span>'
           + (agent.voiceEnabled ? '<span class="rounded-md bg-sky-500/10 px-1.5 py-0.5 text-sky-600 dark:text-sky-400">VOICE</span>' : '')
           + (agent.mediaEnabled ? '<span class="rounded-md bg-violet-500/10 px-1.5 py-0.5 text-violet-600 dark:text-violet-400">MEDIA ' + agent.mediaFiles.length + '</span>' : '')
-          + (agent.hasGroqKey ? '<span class="rounded-md bg-slate-500/10 px-1.5 py-0.5 text-slate-600 dark:text-slate-300">OWN GROQ KEY</span>' : '')
-          + (agent.hasOpenRouterKey ? '<span class="rounded-md bg-slate-500/10 px-1.5 py-0.5 text-slate-600 dark:text-slate-300">OWN OR KEY</span>' : '')
           + '</div>'
           + '<div class="mt-4 flex gap-2 border-t border-slate-200 pt-4 dark:border-slate-800"><button data-edit="' + esc(agent.id) + '" class="' + btnGhost + ' flex-1 !py-1.5 !text-xs">Edit</button><button data-delete="' + esc(agent.id) + '" class="' + btnDanger + ' !px-3 !py-1.5 !text-xs">Delete</button></div>'
           + '</div>').join('') + '</div>';
       }
 
       function paint() {
-        el.innerHTML = '<div class="space-y-5"><div class="flex flex-wrap items-center justify-between gap-3"><div><p class="text-sm text-slate-500 dark:text-slate-400">Agents reply with your own Groq or OpenRouter keys. Free models are selected by default.</p></div><button id="create-agent" class="' + btnPrimary + '">+ Create agent</button></div>'
-          + '<div class="rounded-xl border border-sky-500/30 bg-sky-500/5 p-3 text-xs text-sky-700 dark:text-sky-300">⚠️ Use YOUR OWN keys (not the developer’s) to avoid limits. Groq is free at console.groq.com/keys. OpenRouter offers <b>:free</b> models and paid models — add a key in Settings.</div>'
+        const accounts = connectedInstances();
+        el.innerHTML = '<div class="space-y-5"><div class="flex flex-wrap items-center justify-between gap-3"><div><p class="text-sm text-slate-500 dark:text-slate-400">Agents reply with the models that were tested live on the server, from the WhatsApp account you assign.</p></div><button id="create-agent" class="' + btnPrimary + '">+ Create agent</button></div>'
+          + '<div class="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300">🔑 AI keys are read only from the server environment (<code class="rounded bg-slate-200 px-1 dark:bg-slate-800">GROQ_API_KEY</code>, <code class="rounded bg-slate-200 px-1 dark:bg-slate-800">OPENROUTER_API_KEY</code>). Nothing is typed in the browser. '
+          + (state.config?.ai?.groq ? '<b class="text-emerald-600 dark:text-emerald-400">Groq key: ready</b>' : '<b class="text-rose-600 dark:text-rose-400">GROQ_API_KEY missing on the server</b>')
+          + ' · ' + (accounts.length ? accounts.length + ' connected WhatsApp account(s)' : '<b class="text-amber-600 dark:text-amber-400">no connected WhatsApp account</b>')
+          + '</div>'
           + '<div id="agent-list">' + renderList() + '</div></div>';
 
         $('#create-agent', el).addEventListener('click', () => openAgentModal());
@@ -36,31 +55,164 @@
       function openAgentModal(agent = null) {
         const editing = Boolean(agent);
         mediaFiles = agent ? [...agent.mediaFiles] : [];
+
+        const accounts = connectedInstances();
+        const currentInstance = agent?.connectedInstance || '';
+        const instanceField = accounts.length
+          ? '<div><label class="' + labelCls + '" for="agent-instance">Connected WhatsApp account to reply from *</label><select id="agent-instance" required class="' + inputCls + '"><option value="">Select a connected account…</option>'
+            + accounts.map((item) => '<option value="' + esc(item.name) + '"' + (item.name === currentInstance ? ' selected' : '') + '>' + esc(accountOptionLabel(item)) + '</option>').join('')
+            + '</select><p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">Replies are sent through this account via WhatsApp sendText / sendMedia.</p></div>'
+          : '<div class="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-xs text-amber-800 dark:text-amber-200"><p class="font-bold">Connect WhatsApp first in Connect page</p><p class="mt-1">No account with state <code>open</code> was found, so there is nowhere to send replies from.</p><a href="/connect" data-link class="' + btnPrimary + ' mt-3 !py-1.5 !text-xs">Go to Connect</a></div>';
+
         const body = '<form id="agent-form" class="space-y-4">'
           + '<div><label class="' + labelCls + '" for="agent-name">Name</label><input id="agent-name" class="' + inputCls + '" required placeholder="Sales assistant" value="' + esc(agent?.name || '') + '" /></div>'
-          + '<div><label class="' + labelCls + '" for="agent-instruction">Instruction / system prompt</label><textarea id="agent-instruction" rows="5" class="' + inputCls + '" placeholder="You are a friendly support agent for ...">' + esc(agent?.instruction || '') + '</textarea></div>'
-          + '<div><label class="' + labelCls + '" for="agent-model">Model</label><select id="agent-model" class="' + inputCls + '">' + modelSelectOptions(agent?.model || 'groq/llama-3.3-70b-versatile') + '</select><div id="model-meta" class="mt-2 text-xs text-slate-500 dark:text-slate-400"></div></div>'
+          + instanceField
+          + '<div><label class="' + labelCls + '" for="agent-instruction">Instruction / system prompt</label><textarea id="agent-instruction" rows="4" class="' + inputCls + '" placeholder="You are a friendly support agent for ...">' + esc(agent?.instruction || '') + '</textarea></div>'
+          + '<div class="rounded-xl border border-slate-200 p-4 dark:border-slate-800">'
+          + '<div class="flex flex-wrap items-center justify-between gap-2"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Model</p><span id="model-test-state" class="text-[11px] text-slate-500 dark:text-slate-400"></span></div>'
+          + '<div id="model-tabs" class="mt-2 flex flex-wrap gap-1.5"></div>'
+          + '<input id="model-search" class="' + inputCls + ' mt-2 !py-1.5 !text-xs" placeholder="Search AI models..." autocomplete="off" />'
+          + '<div id="model-list" class="mt-2 max-h-64 space-y-1.5 overflow-y-auto pr-1"></div>'
+          + '<div class="mt-3 flex flex-wrap items-center justify-between gap-2"><p id="model-meta" class="text-[11px] text-slate-500 dark:text-slate-400"></p><button type="button" id="retest-models" class="' + btnGhost + ' !py-1 !text-[11px]">Re-test all models live</button></div>'
+          + '</div>'
           + '<div class="grid gap-3 sm:grid-cols-2">'
-          + '<label class="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-800"><span><span class="block text-sm font-semibold">Voice notes</span><span class="text-xs text-slate-500 dark:text-slate-400">Reply with real voice' + (state.config?.ai?.groq ? '' : ' (needs Groq key)') + '</span></span><input type="checkbox" class="toggle" id="agent-voice"' + (agent?.voiceEnabled ? ' checked' : '') + ' /></label>'
+          + '<label class="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-800"><span><span class="block text-sm font-semibold">Voice notes</span><span class="text-xs text-slate-500 dark:text-slate-400">Reply with real voice</span></span><input type="checkbox" class="toggle" id="agent-voice"' + (agent?.voiceEnabled ? ' checked' : '') + ' /></label>'
           + '<label class="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-800"><span><span class="block text-sm font-semibold">Media files</span><span class="text-xs text-slate-500 dark:text-slate-400">Send real uploads</span></span><input type="checkbox" class="toggle" id="agent-media"' + (agent?.mediaEnabled ? ' checked' : '') + ' /></label>'
           + '</div>'
           + '<div id="media-section" class="' + (agent?.mediaEnabled ? '' : 'hidden') + ' rounded-xl border border-slate-200 p-4 dark:border-slate-800"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Media (images, docs, audio · max 20 MB each)</p><div id="media-list" class="mt-3 space-y-2"></div><input id="agent-files" type="file" multiple class="mt-3 block w-full text-xs text-slate-500 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-500 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-slate-950 dark:text-slate-400" /></div>'
-          + '<details class="rounded-xl border border-slate-200 p-4 dark:border-slate-800"><summary class="cursor-pointer text-xs font-semibold text-slate-600 dark:text-slate-300">Agent keys (optional — overrides global BYOK)</summary><div class="mt-3 grid gap-3 sm:grid-cols-2"><div><label class="' + labelCls + '" for="agent-groq">Groq key</label><input id="agent-groq" type="password" autocomplete="off" class="' + inputCls + '" placeholder="' + (agent?.hasGroqKey ? 'saved — leave empty to keep' : 'gsk_...') + '" /></div><div><label class="' + labelCls + '" for="agent-or">OpenRouter key</label><input id="agent-or" type="password" autocomplete="off" class="' + inputCls + '" placeholder="' + (agent?.hasOpenRouterKey ? 'saved — leave empty to keep' : 'sk-or-...') + '" /></div></div><p class="mt-2 text-[11px] text-slate-500 dark:text-slate-400">Leave empty to use the keys from Settings or the environment.</p></details>'
-          + '<div class="flex flex-wrap justify-end gap-2 border-t border-slate-200 pt-4 dark:border-slate-800"><button type="button" data-cancel class="' + btnGhost + '">Cancel</button><button type="submit" id="save-agent" class="' + btnPrimary + '">' + (editing ? 'Save changes' : 'Create agent') + '</button></div>'
+          + '<div class="flex flex-wrap justify-end gap-2 border-t border-slate-200 pt-4 dark:border-slate-800"><button type="button" data-cancel class="' + btnGhost + '">Cancel</button><button type="submit" id="save-agent" class="' + btnPrimary + '"' + (accounts.length ? '' : ' disabled') + '>' + (editing ? 'Save changes' : 'Create agent') + '</button></div>'
           + '</form>';
 
         const modal = openModal({ title: editing ? 'Edit agent' : 'Create agent', body });
         const form = $('#agent-form', modal.root);
-        const modelEl = $('#agent-model', form);
         const mediaSection = $('#media-section', form);
         const mediaList = $('#media-list', form);
+        const listEl = $('#model-list', form);
+        const tabsEl = $('#model-tabs', form);
+        const stateEl = $('#model-test-state', form);
+        const metaEl = $('#model-meta', form);
 
-        function updateModelMeta() {
-          const info = modelInfo(modelEl.value);
-          const free = modelEl.value.startsWith('groq/') || modelEl.value.endsWith(':free');
-          $('#model-meta', form).innerHTML = (free ? '<span class="font-semibold text-emerald-600 dark:text-emerald-400">FREE</span>' : '<span class="font-semibold text-amber-600 dark:text-amber-400">PAID</span>')
-            + ' · ' + esc(info?.label || modelEl.value.split('/').pop()) + (info && !free ? ' · ' + esc(priceLabel(info)) : '');
+        let selectedModel = agent?.model || defaultModelId();
+        let modelTab = 'free';
+        let modelQuery = '';
+
+        function tabButton(id, label, count) {
+          const active = modelTab === id;
+          const cls = active
+            ? 'rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-bold text-emerald-700 dark:text-emerald-300'
+            : 'rounded-full border border-slate-300 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800';
+          return '<button type="button" data-tab="' + id + '" class="' + cls + '">' + label + ' (' + count + ')</button>';
         }
+
+        function modelRow(model) {
+          const checked = model.id === selectedModel;
+          const latency = model.latency !== null && model.latency !== undefined ? model.latency + ' ms' : '';
+          const border = checked
+            ? 'border-emerald-500 bg-emerald-500/5'
+            : 'border-slate-200 dark:border-slate-800';
+          return '<label class="flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2 text-xs ' + border + (model.working ? '' : ' opacity-70') + '">'
+            + '<input type="radio" name="agent-model" value="' + esc(model.id) + '" class="accent-emerald-500"' + (checked ? ' checked' : '') + (model.working ? '' : ' disabled') + ' />'
+            + '<span class="min-w-0 flex-1"><span class="block truncate font-semibold">' + esc(model.displayName || model.id) + '</span><span class="block truncate font-mono text-[10px] text-slate-500 dark:text-slate-400" title="' + esc(model.error || model.id) + '">' + esc(model.id) + '</span></span>'
+            + '<span class="flex flex-none items-center gap-1.5">' + modelBadge(model.id)
+            + (latency ? '<span class="text-[10px] text-slate-500 dark:text-slate-400">' + esc(latency) + '</span>' : '')
+            + '</span></label>';
+        }
+
+        function paintMeta() {
+          const info = modelInfo(selectedModel);
+          metaEl.innerHTML = 'Selected: <b>' + esc(info?.displayName || modelLabel(selectedModel)) + '</b>'
+            + (info ? ' · ' + esc(info.tier) + ' · ' + esc(info.working ? 'responded in ' + (info.latency ?? '?') + ' ms' : 'not working') : ' · never tested');
+        }
+
+        function paintModelList() {
+          const groups = state.catalog.groups || { freeWorking: [], paidWorking: [], notWorking: [] };
+          tabsEl.innerHTML = tabButton('all', 'All', groups.freeWorking.length + groups.paidWorking.length + groups.notWorking.length)
+            + tabButton('free', 'Free Working', groups.freeWorking.length)
+            + tabButton('paid', 'Paid Working', groups.paidWorking.length);
+
+          $$('[data-tab]', tabsEl).forEach((button) =>
+            button.addEventListener('click', () => {
+              modelTab = button.dataset.tab;
+              paintModelList();
+            }),
+          );
+
+          if (state.catalog.testing) {
+            stateEl.textContent = 'Testing every model live…';
+            listEl.innerHTML = spinner('Testing models live on the server');
+            clearTimeout(pollTimer);
+            pollTimer = setTimeout(async () => {
+              await loadCatalog(true);
+              if (!document.body.contains(listEl)) return;
+              paintModelList();
+            }, 5000);
+            return;
+          }
+
+          stateEl.textContent = state.catalog.testedAt
+            ? 'Tested ' + timeAgo(state.catalog.testedAt) + ' ago'
+            : 'Never tested';
+
+          const source = modelTab === 'free'
+            ? groups.freeWorking
+            : modelTab === 'paid'
+              ? groups.paidWorking
+              : [...groups.freeWorking, ...groups.paidWorking, ...groups.notWorking];
+          const query = modelQuery.trim().toLowerCase();
+          const rows = query
+            ? source.filter((model) => (String(model.displayName || '') + ' ' + model.id).toLowerCase().includes(query))
+            : source;
+
+          if (!rows.length) {
+            const errors = (state.catalog.errors || []).filter(Boolean);
+            listEl.innerHTML = '<p class="rounded-lg border border-dashed border-slate-300 p-3 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-400">'
+              + (query ? 'No model matches “' + esc(modelQuery) + '”.' : 'No models in this group yet.')
+              + (errors.length ? '<br><span class="text-rose-600 dark:text-rose-400">' + esc(errors.join(' · ')) + '</span>' : '')
+              + '</p>';
+            return;
+          }
+
+          listEl.innerHTML = rows.map(modelRow).join('');
+          $$('input[name="agent-model"]', listEl).forEach((input) =>
+            input.addEventListener('change', () => {
+              selectedModel = input.value;
+              paintMeta();
+              paintModelList();
+            }),
+          );
+        }
+
+        $('#model-search', form).addEventListener('input', (event) => {
+          modelQuery = event.target.value;
+          paintModelList();
+        });
+
+        $('#retest-models', form).addEventListener('click', async (event) => {
+          const button = event.currentTarget;
+          button.disabled = true;
+          button.textContent = 'Testing all models…';
+          try {
+            const report = await api('/api/test-groq-models', { method: 'POST', timeoutMs: 240000 });
+            state.catalog = {
+              ...state.catalog,
+              free: report.free || [],
+              paid: report.paid || [],
+              groups: report.groups || state.catalog.groups,
+              testing: Boolean(report.testing),
+              tested: Boolean(report.tested),
+              testedAt: report.testedAt || null,
+              errors: report.errors || [],
+            };
+            paintModelList();
+            paintMeta();
+            toast('Re-tested: ' + (report.counts?.freeWorking || 0) + ' free + ' + (report.counts?.paidWorking || 0) + ' paid working');
+          } catch (error) {
+            toast(error.message, 'error');
+          } finally {
+            button.disabled = false;
+            button.textContent = 'Re-test all models live';
+          }
+        });
 
         function paintMedia() {
           if (!mediaFiles.length) {
@@ -87,30 +239,35 @@
           }
         }
 
-        modelEl.addEventListener('change', updateModelMeta);
-        updateModelMeta();
+        paintModelList();
+        paintMeta();
         paintMedia();
 
         $('#agent-media', form).addEventListener('change', (event) => {
           mediaSection.classList.toggle('hidden', !event.target.checked);
         });
 
-        $('[data-cancel]', form).addEventListener('click', modal.close);
+        $('[data-cancel]', form).addEventListener('click', () => {
+          clearTimeout(pollTimer);
+          modal.close();
+        });
 
         form.addEventListener('submit', async (event) => {
           event.preventDefault();
           const button = $('#save-agent', form);
+          const instanceEl = $('#agent-instance', form);
+          const connectedInstance = instanceEl ? instanceEl.value : '';
+          if (!connectedInstance) {
+            return toast('Connect WhatsApp first in Connect page', 'error');
+          }
           const payload = {
             name: $('#agent-name', form).value.trim(),
             instruction: $('#agent-instruction', form).value,
-            model: modelEl.value,
+            model: selectedModel,
             voiceEnabled: $('#agent-voice', form).checked,
             mediaEnabled: $('#agent-media', form).checked,
+            connectedInstance,
           };
-          const groqKey = $('#agent-groq', form).value.trim();
-          const openrouterKey = $('#agent-or', form).value.trim();
-          if (groqKey) payload.groqKey = groqKey;
-          if (openrouterKey) payload.openrouterKey = openrouterKey;
           if (!payload.name) return toast('Agent name is required', 'error');
 
           button.disabled = true;
@@ -128,6 +285,7 @@
               await api('/api/agents/' + encodeURIComponent(agentId) + '/media', { method: 'POST', body: formData });
             }
 
+            clearTimeout(pollTimer);
             modal.close();
             await loadAgents();
             paint();
