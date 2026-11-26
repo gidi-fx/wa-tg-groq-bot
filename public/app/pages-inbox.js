@@ -16,7 +16,7 @@
       el.innerHTML = '<div class="grid gap-4 lg:grid-cols-[340px_1fr]">'
         + '<div class="' + cardCls + ' flex max-h-[78vh] min-h-[420px] flex-col overflow-hidden">'
         + '<div class="border-b border-slate-200 p-3 dark:border-slate-800"><div class="flex gap-2"><input id="inbox-search" class="' + inputCls + '" placeholder="Search chats…" /><button id="inbox-refresh" class="' + btnGhost + ' !px-2.5" title="Refresh">↻</button></div>'
-        + '<div class="mt-2 flex items-center justify-between"><p class="text-[11px] text-slate-500 dark:text-slate-400" id="inbox-count">—</p><div class="flex items-center gap-2"><select id="sync-instance" class="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold dark:border-slate-700 dark:bg-slate-950"></select><button id="inbox-sync" class="text-[11px] font-semibold text-emerald-600 hover:underline dark:text-emerald-400">Sync</button></div></div></div>'
+        + '<div class="mt-2 flex items-center justify-between"><p class="text-[11px] text-slate-500 dark:text-slate-400" id="inbox-count">—</p></div><div id="inbox-tabs" class="flex border-b border-slate-200 px-3 py-2 dark:border-slate-800"><button class="tab-active" data-tab="all">All</button><button class="" data-tab="unread">Unread</button></div><div class="flex items-center gap-2"><select id="sync-instance" class="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold dark:border-slate-700 dark:bg-slate-950"></select><button id="inbox-sync" class="text-[11px] font-semibold text-emerald-600 hover:underline dark:text-emerald-400">Sync</button></div></div></div>'
         + '<div id="chat-list" class="scroll-thin flex-1 overflow-y-auto"></div></div>'
         + '<div class="' + cardCls + ' flex max-h-[78vh] min-h-[420px] flex-col overflow-hidden">'
         + '<div id="thread-header" class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-800"><div class="min-w-0"><p class="truncate text-sm font-bold" id="thread-name">Select a chat</p><p class="truncate text-[11px] text-slate-500 dark:text-slate-400" id="thread-jid">Messages from Supabase inbox</p></div><div class="flex items-center gap-2"><select id="assign-agent" class="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs font-semibold dark:border-slate-700 dark:bg-slate-950"><option value="">No agent</option></select></div></div>'
@@ -41,13 +41,18 @@
           : '<option value="">not connected</option>';
       }
 
-      function paintConversations() {
-        $('#inbox-count', el).textContent = state.inbox.conversations.length + ' chat' + (state.inbox.conversations.length === 1 ? '' : 's');
-        if (!state.inbox.conversations.length) {
+      function paintConversations(filter = 'all') {
+        // Filter conversations based on tab selection
+        let conversations = state.inbox.conversations || [];
+        if (filter === 'unread') {
+          conversations = conversations.filter((c) => c.unread > 0);
+        }
+        $('#inbox-count', el).textContent = conversations.length + ' chat' + (conversations.length === 1 ? '' : 's');
+        if (!conversations.length) {
           listEl.innerHTML = '<div class="p-6 text-center text-sm text-slate-500 dark:text-slate-400"><p>No conversations yet.</p><p class="mt-1 text-xs">Send a WhatsApp message to a connected instance, or press Sync.</p></div>';
           return;
         }
-        listEl.innerHTML = state.inbox.conversations.map((chat) => {
+        listEl.innerHTML = conversations.map((chat) => {
           const active = selected === chat.jid;
           const initials = String(chat.pushName || chat.jid).slice(0, 2).toUpperCase();
           return '<button data-chat="' + esc(chat.jid) + '" class="flex w-full items-start gap-3 border-b border-slate-100 px-4 py-3 text-left transition hover:bg-slate-50 dark:border-slate-800/60 dark:hover:bg-slate-800/40 ' + (active ? 'bg-emerald-500/10' : '') + '">'
@@ -182,6 +187,19 @@
       await loadInstanceOptions();
       await refresh(false);
       if (selected) await paintThread();
+      toggleTab('all');
+
+      // Tab switching: All / Unread
+      const tabButtons = $$('[data-tab]', $('#inbox-tabs', el));
+      function toggleTab(tab) {
+        tabButtons.forEach((b) => {
+          b.classList.toggle('tab-active', b.dataset.tab === tab);
+          b.classList.toggle('tab-inactive', b.dataset.tab !== tab);
+        });
+        paintConversations(tab);
+      }
+      $$('[data-tab]', $('#inbox-tabs', el)).forEach((button) =>
+        button.addEventListener('click', () => toggleTab(button.dataset.tab)));
 
       // Optional Supabase Realtime; polling remains the fallback.
       let channel = null;
