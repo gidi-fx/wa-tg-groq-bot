@@ -68,14 +68,17 @@ Users can also save keys in **Settings** (stored in Supabase, or in memory) or p
 | --- | --- | --- |
 | GET | `/health` | Liveness + config flags |
 | GET | `/api/config` | Status and counts |
-| GET | `/api/models` | Free/paid catalog (live OpenRouter) |
+| GET | `/api/models` | Live-tested catalog (`groqAllowed` = the 2 Groq models) |
+| GET | `/api/openrouter/models` | Full OpenRouter catalog for the searchable picker |
+| POST | `/api/transcribe` | Groq Whisper STT (`file`, `audioBase64` or `audioUrl`) |
+| GET | `/api/instance/qr/:instance` | Latest QR / pairing code pushed by `qrcode.updated` |
 | GET/POST | `/api/agents` | List / create agents |
 | GET/PUT/DELETE | `/api/agents/:id` | Read / update / delete |
 | POST | `/api/agents/:id/media` | Upload media (max 20 MB, 10 files) |
 | DELETE | `/api/agents/:id/media?path=` | Remove a media file |
 | GET/PUT | `/api/settings` | Global BYOK keys (masked on read) |
 | POST | `/api/instance/create` | Create Evolution instance + webhook |
-| GET | `/api/instance/connect/:instance?number=` | QR base64 or pairing code |
+| GET/POST | `/api/instance/connect/:instance` | QR base64 and/or pairing code (`POST { number }`) |
 | GET | `/api/instance/status/:instance` | Connection status |
 | POST | `/webhook/:instance` | Evolution `messages.upsert` |
 | GET | `/api/inbox/conversations` | Chats grouped by JID |
@@ -93,15 +96,26 @@ Users can also save keys in **Settings** (stored in Supabase, or in memory) or p
 ## Model routing
 
 - `groq/<model>` → `https://api.groq.com/openai/v1/chat/completions`
-- `openrouter/<model>` → `https://openrouter.ai/api/v1/chat/completions`
-- Fallback chain: **selected → `groq/llama-3.1-8b-instant` → error message**
+  - allowed: `groq/openai/gpt-oss-120b` (label “1. gpt-oss-120b - BEST (Sales/Coding)”) and `groq/openai/gpt-oss-20b` (“2. gpt-oss-20b - FASTEST”) — nothing else; other ids return `groq_model_not_allowed`
+  - if Groq says the model does not exist, retried without the `openai/` prefix (`gpt-oss-120b` / `gpt-oss-20b`)
+- `openrouter/<model>` → `https://openrouter.ai/api/v1/chat/completions` — any model id is accepted, no whitelist
+- Fallback chain: **selected → `groq/openai/gpt-oss-20b` → error message**
 - Paid model without an OpenRouter key → `Add OpenRouter key in Settings to use paid models`
 
 ## Media and voice
 
 - Agent uploads are stored in Supabase Storage (`agent-media`) when configured, otherwise in memory for the session, and sent as real files via Evolution `POST /message/sendMedia/:instance` with base64.
 - If `media_enabled`, the agent can request a file with `[[SEND_MEDIA: file-name]]`.
-- If `voice_enabled`, replies are rendered to speech (Groq `playai-tts`, optional ElevenLabs) and sent via `POST /message/sendWhatsAppAudio/:instance`. On TTS failure the reply falls back to text.
+- Incoming voice notes are downloaded from Evolution and transcribed by Groq Whisper (`whisper-large-v3`, fallback `whisper-large-v3-turbo`).
+- If `voice_enabled` (“Reply as Voice Note (uses Groq TTS)”), replies are rendered to speech with Groq TTS — `canopylabs/orpheus-v1-english`, voice `troy`, `wav` (`playai-tts` was retired 2025-12-31) — and sent via `POST /message/sendWhatsAppAudio/:instance`. On TTS failure the reply falls back to text.
+- Full loop: voice in → STT → `gpt-oss-120b` → TTS → voice note out.
+
+## Pairing code (Evolution)
+
+- `connectInstance()` calls `POST /instance/connect/<instance>` with `{ "number": "234..." }` and only falls back to `GET ...?number=` when that fails. Older GET-only calls returned a QR with `pairingCode: null`.
+- Webhook events `qrcode.updated` and `connection.update` are no longer ignored: the app caches `pairingCode`/`base64` per instance, serves it on `GET /api/instance/qr/:instance` and reuses it in the connect response.
+- The Connect page has **Try Pairing Code Again** and polls the cached endpoint for ~36 s after each request.
+- Evolution env needed for pairing: `AUTH_TYPE=baileys`, `ENABLE_PAIRING_CODE=true`, `QRCODE_LIMIT=5`, `QRCODE_COLOR=#198754`, `CACHE_ENABLED=false`, `DATABASE_ENABLED=false` (memory).
 
 ## Notes
 

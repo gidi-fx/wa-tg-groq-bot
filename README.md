@@ -68,9 +68,17 @@ Create agents in **/agents** with:
 - Name + instruction
 - **Voice Note** toggle (replies with a real WhatsApp voice note)
 - **Media** toggle + multi-file upload (images, docs, audio; stored in Supabase Storage when configured, otherwise in memory; 20 MB/file)
-- Model dropdown grouped **FREE (Groq)**, **FREE (OpenRouter)** and **PAID (OpenRouter)** with prices per 1k tokens
+- **Groq** is locked to exactly two models, tested live on the server:
 
-Free models are the default. The OpenRouter catalog is fetched live from `https://openrouter.ai/api/v1/models` and filtered into free/paid.
+  | Model id | Label |
+  | --- | --- |
+  | `groq/openai/gpt-oss-120b` | 1. gpt-oss-120b - BEST (Sales/Coding) |
+  | `groq/openai/gpt-oss-20b` | 2. gpt-oss-20b - FASTEST |
+
+  Both are sent to `POST https://api.groq.com/openai/v1/chat/completions`. If Groq answers that the model does not exist, the request is retried without the `openai/` prefix (`gpt-oss-120b` / `gpt-oss-20b`). Any other `groq/...` model is rejected by the API, so no qwen/llama/Gemma entries appear anywhere.
+- **OpenRouter** accepts **any** model: a searchable picker over the full live catalog from `https://openrouter.ai/api/v1/models` (≈470 models) plus a free-text field for any id such as `anthropic/claude-3.5-sonnet` or `qwen/qwen3-32b`. Nothing is restricted there.
+
+Free Groq models are the default. Re-testing is live: `/api/models` only lists models that actually replied.
 
 ### 5. Inbox, groups, playground
 
@@ -87,14 +95,14 @@ Free models are the default. The OpenRouter catalog is fetched live from `https:
 3. The agent is resolved:
    - group → `group_hosts`
    - direct chat → `chat_assignments`, falling back to the first agent
-4. Voice notes are transcribed with Groq Whisper (`whisper-large-v3`).
+4. Voice notes are transcribed with Groq Whisper (`whisper-large-v3`, falling back to `whisper-large-v3-turbo`) via `POST /api/transcribe`.
 5. `callAI()` routes by model prefix:
    - `groq/*` → `https://api.groq.com/openai/v1/chat/completions`
    - `openrouter/*` → `https://openrouter.ai/api/v1/chat/completions`
-   - fallback chain: **selected → `groq/llama-3.1-8b-instant` → error message**
+   - fallback chain: **selected → `groq/openai/gpt-oss-20b` → error message**
 6. Reply delivery:
    - requested media (`[[SEND_MEDIA: file]]`) → `POST /message/sendMedia/:instance`
-   - `voice_enabled` → Groq TTS (`playai-tts`, ogg/opus) → `POST /message/sendWhatsAppAudio/:instance`, text fallback on failure
+   - `voice_enabled` → Groq TTS (`canopylabs/orpheus-v1-english`, voice `troy`, wav) → `POST /message/sendWhatsAppAudio/:instance`, text fallback on failure
    - otherwise → quoted text via `POST /message/sendText/:instance`
 7. Presence `composing` is shown while generating and `paused` afterwards.
 
@@ -103,12 +111,15 @@ Free models are the default. The OpenRouter catalog is fetched live from `https:
 | Method | Path |
 | --- | --- |
 | GET | `/health`, `/api/config`, `/api/models` |
+| GET | `/api/openrouter/models` |
+| POST | `/api/transcribe` (multipart `file`, or JSON `audioBase64` / `audioUrl`) |
+| GET | `/api/instance/qr/:instance` (latest QR / pairing code pushed by webhook) |
 | GET/POST | `/api/agents` |
 | GET/PUT/DELETE | `/api/agents/:id` |
 | POST/DELETE | `/api/agents/:id/media` |
 | GET/PUT | `/api/settings` |
 | POST | `/api/instance/create`, `/instance/create` |
-| GET | `/api/instance/connect/:instance`, `/instance/connect/:instance` |
+| GET/POST | `/api/instance/connect/:instance`, `/instance/connect/:instance` |
 | GET | `/api/instance/status/:instance` |
 | POST/GET | `/webhook/:instance` |
 | GET | `/api/inbox` (snapshot with `hasSupabase` + `data`) |
@@ -122,6 +133,12 @@ Free models are the default. The OpenRouter catalog is fetched live from `https:
 ## Environment
 
 See [`.env.example`](.env.example). Required: `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `GROQ_API_KEY` (or a key saved in Settings). Optional: `SUPABASE_URL`, `SUPABASE_KEY` (persistence; omit for in-memory), `OPENROUTER_API_KEY`, `PUBLIC_URL`. `PORT` defaults to `3000`. The server listens on `0.0.0.0` for hosts like Render.
+
+Voice overrides: `GROQ_TRANSCRIBE_MODEL` (default `whisper-large-v3`), `GROQ_TRANSCRIBE_FALLBACK_MODEL` (default `whisper-large-v3-turbo`), `GROQ_TTS_MODEL` (default `canopylabs/orpheus-v1-english`), `GROQ_TTS_VOICE` (default `troy`; also `autumn`, `diana`, `hannah`, `austin`, `daniel`), `GROQ_TTS_FORMAT` (default `wav`). Groq retired `playai-tts` on 2025-12-31.
+
+## Pairing code (Evolution)
+
+Evolution only issues a real pairing code when `POST /instance/connect/<instance>` is called with `{ "number": "234..." }` — the old `GET` returns a QR alone and `pairingCode` stays `null`. This app now posts to that endpoint (falling back to `GET` for older builds) and also handles the `qrcode.updated` webhook, which is where Evolution usually pushes the code. The Connect page shows a **Try Pairing Code Again** button and polls `/api/instance/qr/:instance` for a code for ~36 seconds after each request.
 
 ## Security notes
 
