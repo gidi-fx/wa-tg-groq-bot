@@ -99,7 +99,8 @@ async function postJSON(url, body, headers, label) {
         provider: label,
       });
     }
-    return payload;
+    // `raw` is kept so an empty completion can be logged verbatim.
+    return { payload, raw: text };
   } catch (err) {
     if (err instanceof AppError) throw err;
     if (err.name === 'AbortError') throw new AppError(`${label} timed out after 60s`, 504, 'ai_timeout');
@@ -130,7 +131,7 @@ async function requestChat({ model, messages, temperature, maxTokens }) {
     let lastError = null;
     for (const modelId of candidates) {
       try {
-        const payload = await postJSON(
+        const { payload, raw } = await postJSON(
           `${GROQ_BASE}/chat/completions`,
           {
             model: modelId,
@@ -141,7 +142,7 @@ async function requestChat({ model, messages, temperature, maxTokens }) {
           { Authorization: `Bearer ${key}` },
           'Groq',
         );
-        return { payload, provider: 'groq', model: `groq/${modelId}` };
+        return { payload, raw, provider: 'groq', model: `groq/${modelId}` };
       } catch (err) {
         lastError = err;
         // Only retry the bare id when Groq says the model does not exist.
@@ -168,7 +169,7 @@ async function requestChat({ model, messages, temperature, maxTokens }) {
     Authorization: `Bearer ${key}`,
   };
 
-  const payload = await postJSON(
+  const { payload, raw } = await postJSON(
     `${OPENROUTER_BASE}/chat/completions`,
     {
       model: parsed.id,
@@ -179,30 +180,38 @@ async function requestChat({ model, messages, temperature, maxTokens }) {
     headers,
     'OpenRouter',
   );
-  return { payload, provider: 'openrouter', model: parsed.full };
+  return { payload, raw, provider: 'openrouter', model: parsed.full };
 }
 
 /**
  * Call the selected model, with the required fallback chain:
  * selected -> groq/openai/gpt-oss-20b -> error message.
  */
-export async function callAI({ model, messages, temperature = 0.7, maxTokens = 800 }) {
+/** Reasoning models (gpt-oss) spend max_tokens on reasoning before content, so keep it generous. */
+export async function callAI({ model, messages, temperature = 0.7, maxTokens = 2048 }) {
   const selected = parseModelId(model).full;
   const chain = [selected, FALLBACK_MODEL].filter((value, index, list) => list.indexOf(value) === index);
   const attempts = [];
 
   for (const candidate of chain) {
     try {
-      const { payload, provider, model: used } = await requestChat({
+      const { payload, raw, provider, model: used } = await requestChat({
         model: candidate,
         messages,
         temperature,
         maxTokens,
       });
 
+      // gpt-oss answers live in choices[0].message.content.
       const choice = payload?.choices?.[0];
       let text = stripThinking(choice?.message?.content || '');
-      if (!text) text = "Sorry, I couldn't generate a reply just now. Please try again.";
+      if (!text) {
+        console.warn(
+          `[ai] ${used}: empty content (finish_reason=${choice?.finish_reason || 'unknown'}, `
+          + `completion_tokens=${payload?.usage?.completion_tokens ?? '?'}) raw body: ${String(raw || '').slice(0, 1500)}`,
+        );
+        text = "Sorry, I couldn't generate a reply just now. Please try again.";
+      }
 
       const usage = {
         promptTokens: payload?.usage?.prompt_tokens ?? null,
