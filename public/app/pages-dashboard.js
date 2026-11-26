@@ -1,14 +1,30 @@
     /* ------------------------------ dashboard ----------------------------- */
     async function dashboardPage(el) {
-      const [config, instancesData] = await Promise.all([
-        getConfig(true),
+      let config;
+      try {
+        config = await getConfig(true);
+      } catch (error) {
+        console.error('[dashboard] /api/config failed', error);
+        state.config = fallbackConfig();
+        if (error.offline) {
+          el.innerHTML = offlinePanel(error);
+          return;
+        }
+        config = state.config;
+        toast('Showing temporary data - backend config unavailable', 'info');
+      }
+
+      const [instancesData] = await Promise.all([
         loadInstances().catch(() => ({ instances: [] })),
         loadCatalog().catch(() => null),
       ]);
       const instances = instancesData.instances || [];
       const connected = instances.filter((i) => isInstanceConnected(i.status)).length;
-      const supabaseOk = config.supabase.configured;
-      const evolutionOk = config.evolution.configured;
+      const supabaseOk = supabaseReady(config);
+      const evolutionOk = Boolean(config.evolution && config.evolution.configured);
+      const ai = config.ai || {};
+      const counts = config.counts || {};
+      const bucket = (config.supabase && config.supabase.bucket) || 'unused';
 
       const stat = (label, value, note, tone) =>
         '<div class="' + cardCls + ' p-4"><p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">' + esc(label) + '</p>'
@@ -20,16 +36,16 @@
           ? '<div class="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4"><p class="font-semibold text-amber-700 dark:text-amber-300">⚠️ Supabase not connected - optional</p><p class="mt-1 text-sm text-amber-700/90 dark:text-amber-200/90">Everything works now, but agents, inbox, groups and media are kept <b>in memory</b> and reset when the server restarts. Add <code class="rounded bg-amber-500/20 px-1">SUPABASE_URL</code> and <code class="rounded bg-amber-500/20 px-1">SUPABASE_KEY</code> in <code class="rounded bg-amber-500/20 px-1">.env</code> and run <code class="rounded bg-amber-500/20 px-1">supabase/schema.sql</code> to persist. Get a free project at <a href="https://supabase.com" target="_blank" rel="noopener" class="underline">supabase.com</a>.</p></div>'
           : '')
         + '<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">'
-        + '<div class="' + cardCls + ' p-4"><div class="flex items-start justify-between gap-2"><p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Supabase</p>' + optionalPill(supabaseOk) + '</div><p class="mt-3 text-sm font-semibold">Postgres + Storage (optional)</p><p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">' + (supabaseOk ? 'bucket: ' + esc(config.supabase.bucket) : 'in-memory · bucket unused') + '</p></div>'
+        + '<div class="' + cardCls + ' p-4"><div class="flex items-start justify-between gap-2"><p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Supabase</p>' + optionalPill(supabaseOk) + '</div><p class="mt-3 text-sm font-semibold">Postgres + Storage (optional)</p><p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">' + (supabaseOk ? 'bucket: ' + esc(bucket) : 'in-memory · bucket unused') + '</p></div>'
         + '<div class="' + cardCls + ' p-4"><div class="flex items-start justify-between gap-2"><p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Evolution API</p>' + statusPill(evolutionOk) + '</div><p class="mt-3 text-sm font-semibold">' + connected + ' / ' + instances.length + ' connected</p><p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">' + esc(config.evolution.url || 'EVOLUTION_API_URL missing') + '</p></div>'
-        + '<div class="' + cardCls + ' p-4"><div class="flex items-start justify-between gap-2"><p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">AI keys (BYOK)</p>' + statusPill(config.ai.groq || config.ai.openrouter) + '</div><p class="mt-3 text-sm font-semibold">Groq ' + (config.ai.groq ? '✓' : '—') + ' · OpenRouter ' + (config.ai.openrouter ? '✓' : 'optional') + '</p><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Voice TTS: ' + esc(config.ai.tts) + '</p></div>'
+        + '<div class="' + cardCls + ' p-4"><div class="flex items-start justify-between gap-2"><p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">AI keys (BYOK)</p>' + statusPill(ai.groq || ai.openrouter) + '</div><p class="mt-3 text-sm font-semibold">Groq ' + (ai.groq ? '✓' : '—') + ' · OpenRouter ' + (ai.openrouter ? '✓' : 'optional') + '</p><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Voice TTS: ' + esc(ai.tts || 'unavailable') + '</p></div>'
         + '<div class="' + cardCls + ' border-amber-500/30 p-4"><div class="flex items-start justify-between gap-2"><p class="text-[11px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">Telegram</p><span class="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold uppercase text-amber-700 dark:text-amber-300">Soon</span></div><p class="mt-3 text-sm font-semibold text-amber-700 dark:text-amber-300">' + TELEGRAM + '</p><p class="mt-1 text-xs text-amber-600/80 dark:text-amber-200/70">Not part of this build</p></div>'
         + '</div>'
         + '<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">'
-        + stat('Agents', config.counts.agents, 'AI personas with models and media')
-        + stat('Chats', config.counts.chats, 'Conversations seen in the inbox')
-        + stat('Groups', config.counts.groups, 'Synced from Evolution')
-        + stat('Messages', config.counts.messages, config.supabase.configured ? 'Stored in Supabase' : 'Temporary in-memory messages')
+        + stat('Agents', counts.agents || 0, 'AI personas with models and media')
+        + stat('Chats', counts.chats || 0, 'Conversations seen in the inbox')
+        + stat('Groups', counts.groups || 0, 'Synced from Evolution')
+        + stat('Messages', counts.messages || 0, supabaseOk ? 'Stored in Supabase' : 'Temporary in-memory messages')
         + '</div>'
         + '<div class="grid gap-4 lg:grid-cols-3">'
         + '<div class="' + cardCls + ' p-5 lg:col-span-2"><h2 class="text-sm font-bold">Quick start</h2><div class="mt-4 grid gap-3 sm:grid-cols-2">'
