@@ -104,15 +104,15 @@ async function postJSON(url, body, headers, label) {
   }
 }
 
-async function requestChat({ model, messages, temperature, maxTokens, groqKey, openrouterKey }) {
+async function requestChat({ model, messages, temperature, maxTokens }) {
   const parsed = parseModelId(model);
 
   if (parsed.provider === 'groq') {
-    const key = String(groqKey || process.env.GROQ_API_KEY || '').trim();
+    const key = String(process.env.GROQ_API_KEY || '').trim();
     if (!key) {
       throw new AppError(
-        'No Groq API key. Add your own key in Settings (BYOK) or set GROQ_API_KEY.',
-        400,
+        'Groq API key is not configured on the server. Add GROQ_API_KEY to the backend .env.',
+        503,
         'missing_groq_key',
       );
     }
@@ -130,21 +130,20 @@ async function requestChat({ model, messages, temperature, maxTokens, groqKey, o
     return { payload, provider: 'groq', model: parsed.full };
   }
 
-  const key = String(openrouterKey || process.env.OPENROUTER_API_KEY || '').trim();
+  const key = String(process.env.OPENROUTER_API_KEY || '').trim();
   if (!key) {
-    if (!isFreeModel(parsed.full)) {
-      throw new AppError('Add OpenRouter key in Settings to use paid models', 400, 'missing_openrouter_key');
-    }
-    // Free models still need an OpenRouter key on their side; let the request fail
-    // and the router fall back to a Groq free model.
-    console.warn('[ai] no OpenRouter key - free OpenRouter models fall back to Groq');
+    throw new AppError(
+      'OpenRouter API key is not configured on the server. Add OPENROUTER_API_KEY to the backend .env.',
+      400,
+      'missing_openrouter_key',
+    );
   }
 
   const headers = {
     'HTTP-Referer': String(process.env.PUBLIC_URL || 'https://whatsapp-groq-router'),
     'X-Title': 'WhatsApp Groq Router v2',
+    Authorization: `Bearer ${key}`,
   };
-  if (key) headers.Authorization = `Bearer ${key}`;
 
   const payload = await postJSON(
     `${OPENROUTER_BASE}/chat/completions`,
@@ -164,14 +163,7 @@ async function requestChat({ model, messages, temperature, maxTokens, groqKey, o
  * Call the selected model, with the required fallback chain:
  * selected -> groq/llama-3.1-8b-instant -> error message.
  */
-export async function callAI({
-  model,
-  messages,
-  groqKey,
-  openrouterKey,
-  temperature = 0.7,
-  maxTokens = 800,
-}) {
+export async function callAI({ model, messages, temperature = 0.7, maxTokens = 800 }) {
   const selected = parseModelId(model).full;
   const chain = [selected, FALLBACK_MODEL].filter((value, index, list) => list.indexOf(value) === index);
   const attempts = [];
@@ -183,8 +175,6 @@ export async function callAI({
         messages,
         temperature,
         maxTokens,
-        groqKey,
-        openrouterKey,
       });
 
       const choice = payload?.choices?.[0];
@@ -227,9 +217,9 @@ function parsedProvider(model) {
 }
 
 /** Groq Whisper transcription. Node 18+ FormData/Blob keeps this dependency-free. */
-export async function transcribeAudio(buffer, fileName = 'audio.ogg', groqKey = '', mimetype = 'audio/ogg') {
-  const key = String(groqKey || process.env.GROQ_API_KEY || '').trim();
-  if (!key) throw new AppError('No Groq API key for voice transcription', 400, 'missing_groq_key');
+export async function transcribeAudio(buffer, fileName = 'audio.ogg', mimetype = 'audio/ogg') {
+  const key = String(process.env.GROQ_API_KEY || '').trim();
+  if (!key) throw new AppError('GROQ_API_KEY is not configured on the server (voice transcription)', 503, 'missing_groq_key');
   if (!Buffer.isBuffer(buffer) || !buffer.length) throw new AppError('Empty audio file', 400, 'empty_audio');
 
   const form = new FormData();
@@ -264,7 +254,7 @@ export async function transcribeAudio(buffer, fileName = 'audio.ogg', groqKey = 
  * Text -> speech. ElevenLabs is used when configured, otherwise Groq TTS.
  * Returns { buffer, mimetype, provider }.
  */
-export async function synthesizeSpeech(text, { groqKey = '' } = {}) {
+export async function synthesizeSpeech(text) {
   const input = String(text || '')
     .replace(/\[\[SEND_MEDIA:[^\]]+\]\]/gi, '')
     .replace(/[*_~`#>]/g, ' ')
@@ -293,8 +283,8 @@ export async function synthesizeSpeech(text, { groqKey = '' } = {}) {
     }
   }
 
-  const key = String(groqKey || process.env.GROQ_API_KEY || '').trim();
-  if (!key) throw new AppError('No Groq API key for voice replies', 400, 'missing_groq_key');
+  const key = String(process.env.GROQ_API_KEY || '').trim();
+  if (!key) throw new AppError('GROQ_API_KEY is not configured on the server (voice replies)', 503, 'missing_groq_key');
 
   const format = String(process.env.GROQ_TTS_FORMAT || 'ogg');
   const response = await fetch(`${GROQ_BASE}/audio/speech`, {
