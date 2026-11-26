@@ -13,7 +13,15 @@ import {
 } from '../supabase.js';
 
 const AGENT_COLUMNS =
-  'id,name,instruction,voice_enabled,media_enabled,model,media_files,connected_instance,created_at';
+  'id,name,instruction,voice_enabled,media_enabled,model,media_files,connected_instance,voice_id,reply_mode,created_at';
+const REPLY_MODES = new Set(['textOnly', 'voiceOnly', 'both', 'mirror']);
+
+/** textOnly | voiceOnly | both | mirror - mirror answers a voice note with a voice note. */
+function normalizeReplyMode(value, voiceEnabled = false) {
+  const mode = String(value || '').trim();
+  if (REPLY_MODES.has(mode)) return mode;
+  return voiceEnabled ? 'voiceOnly' : 'textOnly';
+}
 const DEFAULT_MODEL = 'groq/openai/gpt-oss-120b';
 const DEFAULT_INSTRUCTION =
   'You are a helpful WhatsApp assistant. Answer clearly, keep replies short and use plain text.';
@@ -27,6 +35,8 @@ function mapAgent(row) {
     name: row.name,
     instruction: row.instruction || '',
     voiceEnabled: Boolean(row.voice_enabled),
+    voiceId: row.voice_id || null,
+    replyMode: normalizeReplyMode(row.reply_mode, row.voice_enabled),
     mediaEnabled: Boolean(row.media_enabled),
     model: row.model || DEFAULT_MODEL,
     mediaFiles: Array.isArray(row.media_files) ? row.media_files : [],
@@ -99,6 +109,8 @@ export async function createAgent(input = {}) {
     name,
     instruction: String(input.instruction || DEFAULT_INSTRUCTION).trim(),
     voice_enabled: Boolean(input.voiceEnabled),
+    voice_id: input.voiceId ? String(input.voiceId) : null,
+    reply_mode: normalizeReplyMode(input.replyMode, input.voiceEnabled),
     media_enabled: Boolean(input.mediaEnabled),
     model: String(input.model || DEFAULT_MODEL),
     media_files: normalizeMediaFiles(input.mediaFiles),
@@ -130,6 +142,8 @@ export async function updateAgent(id, input = {}) {
   }
   if (input.instruction !== undefined) patch.instruction = String(input.instruction || '');
   if (input.voiceEnabled !== undefined) patch.voice_enabled = Boolean(input.voiceEnabled);
+  if (input.voiceId !== undefined) patch.voice_id = input.voiceId ? String(input.voiceId) : null;
+  if (input.replyMode !== undefined) patch.reply_mode = normalizeReplyMode(input.replyMode, input.voiceEnabled);
   if (input.mediaEnabled !== undefined) patch.media_enabled = Boolean(input.mediaEnabled);
   if (input.model !== undefined) patch.model = String(input.model || DEFAULT_MODEL);
   if (input.mediaFiles !== undefined) patch.media_files = normalizeMediaFiles(input.mediaFiles);
@@ -474,13 +488,15 @@ export async function saveInboxMessage({
   timestamp,
   waMessageId,
 }) {
+  const key = `${instance}|${remoteJid}`;
   if (!hasSupabase) {
     if (waMessageId) {
-      const existing = mem.inbox.find((row) => row.wa_message_id === waMessageId);
+      const existing = mem.inbox.find((row) => row.wa_message_id === waMessageId && row.remote_jid === remoteJid);
       if (existing) return existing.id;
     }
     const row = {
       id: `msg_${randomUUID()}`,
+      key,
       instance: instance || null,
       remote_jid: remoteJid,
       push_name: pushName || null,
@@ -580,21 +596,24 @@ export async function getHistory(jid, limit = 20) {
 function summarizeConversations(rows, assignedByJid, agentNamesById) {
   const conversations = new Map();
   for (const row of rows || []) {
-    const jid = row.remote_jid;
+    const key = row.key || row.remote_jid;
+    const parts = key.split('|');
+    const jid = parts?.[1] || row.remote_jid;
+    const instance = parts?.[0] || row.instance || null;
     if (!jid) continue;
-    let conversation = conversations.get(jid);
+    let conversation = conversations.get(instance);
     if (!conversation) {
       conversation = {
+        instance,
         jid,
         pushName: row.push_name || jid.split('@')[0],
-        instance: row.instance || null,
         isGroup: jid.endsWith('@g.us'),
         lastMessage: row.content || (row.message_type ? `[${row.message_type}]` : ''),
         lastAt: row.timestamp,
         unread: 0,
         count: 0,
       };
-      conversations.set(jid, conversation);
+      conversations.set(instance, conversation);
     }
     conversation.count += 1;
     if (!row.is_from_me) conversation.unread += 1;
@@ -658,7 +677,7 @@ export async function getConversations({ search = '', limit = 1000 } = {}) {
 export async function getInboxMessages(jid, limit = 200) {
   if (!hasSupabase) {
     const rows = mem.inbox
-      .filter((row) => row.remote_jid === jid)
+      .filter((row) => row.remote_jid === jid && row.key)
       .sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))
       .slice(0, Math.min(Number(limit) || 200, 500));
     if (rows.length) {
