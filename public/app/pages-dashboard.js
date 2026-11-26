@@ -72,7 +72,7 @@
       el.innerHTML = '<div class="space-y-5">'
         + '<div class="' + cardCls + ' p-5"><h2 class="text-sm font-bold">Link your WhatsApp</h2>'
         + '<p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Enter your WhatsApp number with the country code. The Evolution instance is created automatically as <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">wa-&lt;digits&gt;</code> — you never type an instance name.</p>'
-        + '<div class="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end"><div class="w-full sm:max-w-sm"><label class="' + labelCls + '" for="pair-phone">WhatsApp number (digits only)</label><input id="pair-phone" class="' + inputCls + '" inputmode="numeric" autocomplete="off" placeholder="2348027899720" value="' + esc(instanceNumber(instance) || '234') + '" /></div><div class="flex flex-wrap gap-2"><button id="get-code" class="' + btnPrimary + '">Get 8-digit pairing code</button><button id="retry-code" class="' + btnGhost + '">Try Pairing Code Again</button></div></div>'
+        + '<div class="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end"><div class="w-full sm:max-w-sm"><label class="' + labelCls + '" for="pair-phone">WhatsApp number (digits only)</label><input id="pair-phone" class="' + inputCls + '" inputmode="numeric" autocomplete="off" placeholder="2348027899720" value="' + esc(instanceNumber(instance) || '234') + '" /></div><div class="flex flex-wrap gap-2"><button id="get-code" class="' + btnPrimary + '">Get pairing code</button><button id="retry-code" class="' + btnGhost + '">Try Pairing Code Again</button></div></div>'
         + '<div id="pair-result" class="mt-4"></div></div>'
         + '<div class="grid gap-5 lg:grid-cols-2">'
         + '<div class="' + cardCls + ' p-5"><div class="flex items-center justify-between gap-3"><h2 class="text-sm font-bold">Link with QR</h2><span id="qr-status"></span></div>'
@@ -174,71 +174,89 @@
         }
       }
 
+      /** WhatsApp codes are 8 characters and may contain letters (e.g. 6DAQQ8N2). */
       function paintPairCode(code) {
-        const digitsOnly = String(code).replace(/\D/g, '');
-        const pretty = digitsOnly.length === 8 ? digitsOnly.replace(/(\d{4})(\d{4})/, '$1-$2') : String(code);
-        resultBox.innerHTML = '<div class="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center"><p class="text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">Pairing code</p><p class="mt-2 font-mono text-3xl font-extrabold tracking-[0.3em] text-emerald-700 dark:text-emerald-300">' + esc(pretty) + '</p><p class="mt-2 text-xs text-slate-600 dark:text-slate-300">WhatsApp → Linked devices → Link with phone number</p></div>';
+        const raw = String(code || '').trim().toUpperCase();
+        const pretty = raw.length === 8 && /^\d{8}$/.test(raw) ? raw.replace(/(\d{4})(\d{4})/, '$1-$2') : raw;
+        resultBox.innerHTML = '<div class="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center"><p class="text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">Pairing code</p><p class="mt-2 font-mono text-4xl font-extrabold tracking-[0.2em] text-emerald-700 dark:text-emerald-300">' + esc(pretty) + '</p><p class="mt-2 text-xs text-slate-600 dark:text-slate-300">WhatsApp → Linked devices → Link with phone number</p></div>';
       }
 
-      let pairPollTimer = null;
+      // One connect call per press: a second call invalidates the first code, so the
+      // buttons stay disabled while the request runs and for 60s afterwards.
+      let pairBusy = false;
+      let pairCooldownUntil = 0;
+      let pairCooldownTimer = null;
+      const CODE_COOLDOWN_MS = 60000;
+      const idleCodeLabels = { 'get-code': 'Get pairing code', 'retry-code': 'Try Pairing Code Again' };
 
-      /** Poll the webhook-pushed QR/pairing payload until a code appears. */
-      function pollPairingCode(attempt = 0) {
-        clearTimeout(pairPollTimer);
-        if (!instance) return;
-        if (attempt > 12) return;
-        pairPollTimer = setTimeout(async () => {
-          try {
-            const data = await api('/api/instance/qr/' + encodeURIComponent(instance));
-            if (data.pairingCode) {
-              paintPairCode(data.pairingCode);
-              return;
-            }
-            if (data.base64 && !$('#pair-result img', el)) {
-              const src = String(data.base64).startsWith('data:') ? data.base64 : 'data:image/png;base64,' + data.base64;
-              resultBox.innerHTML = '<div class="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-center"><p class="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">Pairing code still pending — scan this QR instead</p><img src="' + src + '" alt="WhatsApp QR code" class="mx-auto mt-3 h-48 w-48 rounded-lg bg-white p-2" /></div>';
-            }
-          } catch (error) {
-            // keep polling quietly
-          }
-          pollPairingCode(attempt + 1);
-        }, 3000);
+      function paintCodeButtons() {
+        const remaining = Math.max(0, Math.ceil((pairCooldownUntil - Date.now()) / 1000));
+        Object.keys(idleCodeLabels).forEach((id) => {
+          const button = $('#' + id, el);
+          if (!button) return;
+          const locked = pairBusy || remaining > 0;
+          button.disabled = locked;
+          button.classList.toggle('opacity-50', locked);
+          button.classList.toggle('cursor-not-allowed', locked);
+          button.textContent = pairBusy
+            ? 'Requesting code…'
+            : remaining > 0
+              ? idleCodeLabels[id] + ' (' + remaining + 's)'
+              : idleCodeLabels[id];
+        });
+      }
+
+      function startCodeCooldown() {
+        pairCooldownUntil = Date.now() + CODE_COOLDOWN_MS;
+        clearInterval(pairCooldownTimer);
+        paintCodeButtons();
+        pairCooldownTimer = setInterval(() => {
+          paintCodeButtons();
+          if (Date.now() >= pairCooldownUntil) clearInterval(pairCooldownTimer);
+        }, 1000);
       }
 
       async function getCode() {
+        if (pairBusy || Date.now() < pairCooldownUntil) return;
         const phone = phoneDigits();
         if (phone.length < 8) return toast('Enter the full international number', 'error');
+        const target = 'wa-' + phone;
+        pairBusy = true;
+        paintCodeButtons();
         resultBox.innerHTML = spinner('Requesting pairing code');
         try {
-          // POST /instance/connect/<instance> with { number } — new Evolution builds
-          // ignore the query string and only issue a pairing code on POST.
-          const target = 'wa-' + phone;
-          const result = await api('/api/instance/connect/' + encodeURIComponent(target), {
-            method: 'POST',
-            body: { number: phone },
-            timeoutMs: 90000,
-          });
+          // GET /api/instance/connect/<instance>?number=<digits> → Evolution GET /instance/connect
+          const result = await api(
+            '/api/instance/connect/' + encodeURIComponent(target) + '?number=' + encodeURIComponent(phone),
+            { timeoutMs: 90000 },
+          );
           if (result.instance) instance = result.instance;
-          if (result.pairingCode) {
-            paintPairCode(result.pairingCode);
-          } else if (result.base64) {
-            const src = String(result.base64).startsWith('data:') ? result.base64 : 'data:image/png;base64,' + result.base64;
-            resultBox.innerHTML = '<div class="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-center"><p class="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">Pairing code unavailable — scan this QR instead</p><img src="' + src + '" alt="WhatsApp QR code" class="mx-auto mt-3 h-48 w-48 rounded-lg bg-white p-2" /></div>';
+          const code = result.pairingCode ? String(result.pairingCode) : '';
+          if (code) {
+            paintPairCode(code);
           } else {
-            resultBox.innerHTML = '<p class="text-sm text-amber-600 dark:text-amber-400">Evolution returned neither a pairing code nor a QR yet. Waiting for the <code>qrcode.updated</code> webhook — press <b>Try Pairing Code Again</b> if nothing appears.</p>';
-            // Evolution usually delivers the code through qrcode.updated, not the connect call.
-            pollPairingCode();
+            const raw = String(result.qr || result.base64 || '');
+            if (raw) {
+              const src = raw.startsWith('data:') ? raw : 'data:image/png;base64,' + raw;
+              resultBox.innerHTML = '<div class="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-center"><p class="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">No pairing code in Evolution\'s response — scan this QR instead</p><img src="' + src + '" alt="WhatsApp QR code" class="mx-auto mt-3 h-48 w-48 rounded-lg bg-white p-2" /></div>';
+            } else {
+              resultBox.innerHTML = '<p class="text-sm text-amber-600 dark:text-amber-400">Evolution returned neither a pairing code nor a QR. Wait a minute, then press <b>Try Pairing Code Again</b>.</p>';
+            }
           }
           await loadInstances();
           renderInstances();
           refreshStatus();
         } catch (error) {
           resultBox.innerHTML = '<p class="text-sm text-rose-500">' + esc(error.message) + '</p>';
+        } finally {
+          pairBusy = false;
+          startCodeCooldown();
         }
       }
 
       renderInstances();
       renderStatus('');
+      paintCodeButtons();
       if (instance) refreshStatus();
 
       $('#get-qr', el).addEventListener('click', getQR);
@@ -253,6 +271,6 @@
 
       return () => {
         clearInterval(timer);
-        clearTimeout(pairPollTimer);
+        clearInterval(pairCooldownTimer);
       };
     }
