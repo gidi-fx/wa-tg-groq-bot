@@ -70,13 +70,17 @@
           + '<div><label class="' + labelCls + '" for="agent-instruction">Instruction / system prompt</label><textarea id="agent-instruction" rows="4" class="' + inputCls + '" placeholder="You are a friendly support agent for ...">' + esc(agent?.instruction || '') + '</textarea></div>'
           + '<div class="rounded-xl border border-slate-200 p-4 dark:border-slate-800">'
           + '<div class="flex flex-wrap items-center justify-between gap-2"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Model</p><span id="model-test-state" class="text-[11px] text-slate-500 dark:text-slate-400"></span></div>'
-          + '<div id="model-tabs" class="mt-2 flex flex-wrap gap-1.5"></div>'
-          + '<input id="model-search" class="' + inputCls + ' mt-2 !py-1.5 !text-xs" placeholder="Search AI models..." autocomplete="off" />'
-          + '<div id="model-list" class="mt-2 max-h-64 space-y-1.5 overflow-y-auto pr-1"></div>'
-          + '<div class="mt-3 flex flex-wrap items-center justify-between gap-2"><p id="model-meta" class="text-[11px] text-slate-500 dark:text-slate-400"></p><button type="button" id="retest-models" class="' + btnGhost + ' !py-1 !text-[11px]">Re-test all models live</button></div>'
+          + '<div id="provider-tabs" class="mt-2 flex flex-wrap gap-1.5"></div>'
+          + '<div id="groq-panel" class="mt-2 space-y-1.5"></div>'
+          + '<div id="openrouter-panel" class="mt-2 hidden space-y-1.5">'
+          + '<input id="model-search" class="' + inputCls + ' !py-1.5 !text-xs" placeholder="Search OpenRouter models (claude, qwen, gemini…)" autocomplete="off" />'
+          + '<input id="model-custom" class="' + inputCls + ' !py-1.5 !font-mono !text-xs" placeholder="Or type any model id: anthropic/claude-3.5-sonnet" autocomplete="off" />'
+          + '<div id="model-list" class="max-h-64 space-y-1.5 overflow-y-auto pr-1"></div>'
+          + '</div>'
+          + '<div class="mt-3 flex flex-wrap items-center justify-between gap-2"><p id="model-meta" class="text-[11px] text-slate-500 dark:text-slate-400"></p><button type="button" id="retest-models" class="' + btnGhost + ' !py-1 !text-[11px]">Re-test models live</button></div>'
           + '</div>'
           + '<div class="grid gap-3 sm:grid-cols-2">'
-          + '<label class="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-800"><span><span class="block text-sm font-semibold">Voice notes</span><span class="text-xs text-slate-500 dark:text-slate-400">Reply with real voice</span></span><input type="checkbox" class="toggle" id="agent-voice"' + (agent?.voiceEnabled ? ' checked' : '') + ' /></label>'
+          + '<label class="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-800"><span><span class="block text-sm font-semibold">Reply as Voice Note (uses Groq TTS)</span><span class="text-xs text-slate-500 dark:text-slate-400">Text → speech via Groq, sent with sendWhatsAppAudio</span></span><input type="checkbox" class="toggle" id="agent-voice"' + (agent?.voiceEnabled ? ' checked' : '') + ' /></label>'
           + '<label class="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-800"><span><span class="block text-sm font-semibold">Media files</span><span class="text-xs text-slate-500 dark:text-slate-400">Send real uploads</span></span><input type="checkbox" class="toggle" id="agent-media"' + (agent?.mediaEnabled ? ' checked' : '') + ' /></label>'
           + '</div>'
           + '<div id="media-section" class="' + (agent?.mediaEnabled ? '' : 'hidden') + ' rounded-xl border border-slate-200 p-4 dark:border-slate-800"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Media (images, docs, audio · max 20 MB each)</p><div id="media-list" class="mt-3 space-y-2"></div><input id="agent-files" type="file" multiple class="mt-3 block w-full text-xs text-slate-500 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-500 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-slate-950 dark:text-slate-400" /></div>'
@@ -88,98 +92,147 @@
         const mediaSection = $('#media-section', form);
         const mediaList = $('#media-list', form);
         const listEl = $('#model-list', form);
-        const tabsEl = $('#model-tabs', form);
+        const tabsEl = $('#provider-tabs', form);
+        const groqPanel = $('#groq-panel', form);
+        const orPanel = $('#openrouter-panel', form);
         const stateEl = $('#model-test-state', form);
         const metaEl = $('#model-meta', form);
 
-        let selectedModel = agent?.model || defaultModelId();
-        let modelTab = 'free';
-        let modelQuery = '';
+        // Groq is locked to exactly these 2 models - nothing else is offered.
+        const GROQ_OPTIONS = [
+          { id: 'groq/openai/gpt-oss-120b', label: '1. gpt-oss-120b - BEST (Sales/Coding)' },
+          { id: 'groq/openai/gpt-oss-20b', label: '2. gpt-oss-20b - FASTEST' },
+        ];
 
-        function tabButton(id, label, count) {
-          const active = modelTab === id;
+        let selectedModel = agent?.model || defaultModelId();
+        let modelProvider = String(selectedModel).startsWith('openrouter/') ? 'openrouter' : 'groq';
+        let modelQuery = '';
+        let orCatalog = null;
+        let orError = null;
+        let orLoading = false;
+
+        function providerButton(id, label) {
+          const active = modelProvider === id;
           const cls = active
             ? 'rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-bold text-emerald-700 dark:text-emerald-300'
             : 'rounded-full border border-slate-300 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800';
-          return '<button type="button" data-tab="' + id + '" class="' + cls + '">' + label + ' (' + count + ')</button>';
+          return '<button type="button" data-provider="' + id + '" class="' + cls + '">' + label + '</button>';
         }
 
-        function modelRow(model) {
-          const checked = model.id === selectedModel;
-          const latency = model.latency !== null && model.latency !== undefined ? model.latency + ' ms' : '';
+        function pickedRow(modelId, title, sub) {
+          const checked = modelId === selectedModel;
           const border = checked
             ? 'border-emerald-500 bg-emerald-500/5'
             : 'border-slate-200 dark:border-slate-800';
-          return '<label class="flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2 text-xs ' + border + (model.working ? '' : ' opacity-70') + '">'
-            + '<input type="radio" name="agent-model" value="' + esc(model.id) + '" class="accent-emerald-500"' + (checked ? ' checked' : '') + (model.working ? '' : ' disabled') + ' />'
-            + '<span class="min-w-0 flex-1"><span class="block truncate font-semibold">' + esc(model.displayName || model.id) + '</span><span class="block truncate font-mono text-[10px] text-slate-500 dark:text-slate-400" title="' + esc(model.error || model.id) + '">' + esc(model.id) + '</span></span>'
-            + '<span class="flex flex-none items-center gap-1.5">' + modelBadge(model.id)
-            + (latency ? '<span class="text-[10px] text-slate-500 dark:text-slate-400">' + esc(latency) + '</span>' : '')
-            + '</span></label>';
+          return '<label class="flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2 text-xs ' + border + '">'
+            + '<input type="radio" name="agent-model" value="' + esc(modelId) + '" class="accent-emerald-500"' + (checked ? ' checked' : '') + ' />'
+            + '<span class="min-w-0 flex-1"><span class="block truncate font-semibold">' + esc(title) + '</span>'
+            + '<span class="block truncate font-mono text-[10px] text-slate-500 dark:text-slate-400">' + esc(sub || modelId) + '</span></span>'
+            + '<span class="flex flex-none items-center gap-1.5">' + modelBadge(modelId) + '</span></label>';
+        }
+
+        function bindRows(root) {
+          $$('input[name="agent-model"]', root).forEach((input) =>
+            input.addEventListener('change', () => {
+              selectedModel = input.value;
+              modelProvider = selectedModel.startsWith('openrouter/') ? 'openrouter' : 'groq';
+              paintModelList();
+            }),
+          );
         }
 
         function paintMeta() {
           const info = modelInfo(selectedModel);
           metaEl.innerHTML = 'Selected: <b>' + esc(info?.displayName || modelLabel(selectedModel)) + '</b>'
-            + (info ? ' · ' + esc(info.tier) + ' · ' + esc(info.working ? 'responded in ' + (info.latency ?? '?') + ' ms' : 'not working') : ' · never tested');
+            + (info ? ' · ' + esc(info.working ? 'tested, replies OK' : 'not working yet') : ' · not tested yet');
+        }
+
+        async function loadOpenRouterCatalog(force) {
+          if (orLoading) return;
+          if (orCatalog && !force) return;
+          orLoading = true;
+          listEl.innerHTML = spinner('Loading OpenRouter catalog');
+          try {
+            const data = await api('/api/openrouter/models' + (force ? '?refresh=1' : ''));
+            orCatalog = Array.isArray(data.models) ? data.models : [];
+            orError = data.ok === false ? (data.error || 'Could not load the OpenRouter catalog') : null;
+          } catch (error) {
+            orCatalog = [];
+            orError = error.message;
+          } finally {
+            orLoading = false;
+          }
         }
 
         function paintModelList() {
-          const groups = state.catalog.groups || { freeWorking: [], paidWorking: [], notWorking: [] };
-          tabsEl.innerHTML = tabButton('all', 'All', groups.freeWorking.length + groups.paidWorking.length + groups.notWorking.length)
-            + tabButton('free', 'Free Working', groups.freeWorking.length)
-            + tabButton('paid', 'Paid Working', groups.paidWorking.length);
-
-          $$('[data-tab]', tabsEl).forEach((button) =>
-            button.addEventListener('click', () => {
-              modelTab = button.dataset.tab;
+          tabsEl.innerHTML = providerButton('groq', 'Groq (2 models)') + providerButton('openrouter', 'OpenRouter (any model)');
+          $$('[data-provider]', tabsEl).forEach((button) =>
+            button.addEventListener('click', async () => {
+              modelProvider = button.dataset.provider;
+              if (modelProvider === 'openrouter' && !orCatalog) {
+                await loadOpenRouterCatalog(false);
+              }
               paintModelList();
             }),
           );
 
+          groqPanel.classList.toggle('hidden', modelProvider !== 'groq');
+          orPanel.classList.toggle('hidden', modelProvider !== 'openrouter');
+
           if (state.catalog.testing) {
-            stateEl.textContent = 'Testing every model live…';
-            listEl.innerHTML = spinner('Testing models live on the server');
+            stateEl.textContent = 'Testing the Groq models live…';
             clearTimeout(pollTimer);
             pollTimer = setTimeout(async () => {
               await loadCatalog(true);
-              if (!document.body.contains(listEl)) return;
+              if (!document.body.contains(tabsEl)) return;
               paintModelList();
             }, 5000);
+          } else {
+            stateEl.textContent = state.catalog.testedAt
+              ? 'Tested ' + timeAgo(state.catalog.testedAt) + ' ago'
+              : 'Not tested yet';
+          }
+
+          if (modelProvider === 'groq') {
+            groqPanel.innerHTML = GROQ_OPTIONS.map((option) => pickedRow(option.id, option.label, option.id)).join('');
+            bindRows(groqPanel);
+            paintMeta();
             return;
           }
 
-          stateEl.textContent = state.catalog.testedAt
-            ? 'Tested ' + timeAgo(state.catalog.testedAt) + ' ago'
-            : 'Never tested';
-
-          const source = modelTab === 'free'
-            ? groups.freeWorking
-            : modelTab === 'paid'
-              ? groups.paidWorking
-              : [...groups.freeWorking, ...groups.paidWorking, ...groups.notWorking];
           const query = modelQuery.trim().toLowerCase();
-          const rows = query
-            ? source.filter((model) => (String(model.displayName || '') + ' ' + model.id).toLowerCase().includes(query))
-            : source;
+          const customInput = $('#model-custom', form);
+          const custom = String(customInput?.value || '').trim().replace(/^openrouter\//, '');
 
-          if (!rows.length) {
-            const errors = (state.catalog.errors || []).filter(Boolean);
-            listEl.innerHTML = '<p class="rounded-lg border border-dashed border-slate-300 p-3 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-400">'
-              + (query ? 'No model matches “' + esc(modelQuery) + '”.' : 'No models in this group yet.')
-              + (errors.length ? '<br><span class="text-rose-600 dark:text-rose-400">' + esc(errors.join(' · ')) + '</span>' : '')
-              + '</p>';
-            return;
+          let rows = '';
+          if (custom) {
+            rows += pickedRow('openrouter/' + custom, 'Use typed model: ' + custom, 'any OpenRouter model id');
           }
 
-          listEl.innerHTML = rows.map(modelRow).join('');
-          $$('input[name="agent-model"]', listEl).forEach((input) =>
-            input.addEventListener('change', () => {
-              selectedModel = input.value;
-              paintMeta();
-              paintModelList();
-            }),
-          );
+          if (!orCatalog) {
+            rows += '<p class="rounded-lg border border-dashed border-slate-300 p-3 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-400">'
+              + ('…') + '</p>';
+          } else {
+            const models = orCatalog.filter((model) =>
+              !query || String(model.id + ' ' + (model.name || '')).toLowerCase().includes(query));
+            if (!models.length) {
+              rows += '<p class="rounded-lg border border-dashed border-slate-300 p-3 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-400">'
+                + (query ? 'No catalog model matches “' + esc(modelQuery) + '”. Type the full id above to use it anyway.' : 'OpenRouter catalog is empty.')
+                + '</p>';
+            } else {
+              rows += models.slice(0, 80).map((model) => pickedRow('openrouter/' + model.id, model.name || model.id, model.id)).join('');
+              if (models.length > 80) {
+                rows += '<p class="px-1 text-[10px] text-slate-500 dark:text-slate-400">Showing 80 of ' + models.length + ' matches — refine the search.</p>';
+              }
+            }
+            if (orError) {
+              rows += '<p class="text-[11px] text-rose-600 dark:text-rose-400">' + esc(orError) + '</p>';
+            }
+          }
+
+          listEl.innerHTML = rows;
+          bindRows(listEl);
+          paintMeta();
         }
 
         $('#model-search', form).addEventListener('input', (event) => {
@@ -187,10 +240,16 @@
           paintModelList();
         });
 
+        $('#model-custom', form).addEventListener('input', () => paintModelList());
+
+        if (modelProvider === 'openrouter') {
+          loadOpenRouterCatalog(false).then(paintModelList);
+        }
+
         $('#retest-models', form).addEventListener('click', async (event) => {
           const button = event.currentTarget;
           button.disabled = true;
-          button.textContent = 'Testing all models…';
+          button.textContent = 'Testing models…';
           try {
             const report = await api('/api/test-groq-models', { method: 'POST', timeoutMs: 240000 });
             state.catalog = {
@@ -210,7 +269,7 @@
             toast(error.message, 'error');
           } finally {
             button.disabled = false;
-            button.textContent = 'Re-test all models live';
+            button.textContent = 'Re-test models live';
           }
         });
 
