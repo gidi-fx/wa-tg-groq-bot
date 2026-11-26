@@ -1,6 +1,13 @@
     /* --------------------------------- inbox ------------------------------ */
     async function inboxPage(el) {
-      await Promise.all([loadAgents(), getConfig()]);
+      await Promise.all([
+        loadAgents(),
+        getConfig().catch((error) => {
+          console.error('[inbox] /api/config failed, continuing with in-memory data', error);
+          state.config = fallbackConfig();
+          return state.config;
+        }),
+      ]);
       let selected = state.currentJid || null;
       let timer = null;
       let searchTerm = '';
@@ -30,8 +37,8 @@
         const data = await loadInstances().catch(() => ({ instances: [] }));
         const list = data.instances || [];
         syncSelect.innerHTML = list.length
-          ? list.map((item) => '<option value="' + esc(item.name) + '">' + esc(item.name) + '</option>').join('')
-          : '<option value="">no instance</option>';
+          ? list.map((item) => '<option value="' + esc(item.name) + '">' + esc(instanceNumber(item.name) ? 'Connected as ' + instanceNumber(item.name) : 'Linked WhatsApp') + '</option>').join('')
+          : '<option value="">not connected</option>';
       }
 
       function paintConversations() {
@@ -181,7 +188,7 @@
       let realtimeClient = null;
       try {
         const config = state.config || (await getConfig());
-        if (config.realtime?.url && config.realtime?.anonKey) {
+        if (supabaseReady(config) && config.realtime && config.realtime.url && config.realtime.anonKey) {
           const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
           realtimeClient = createClient(config.realtime.url, config.realtime.anonKey);
           channel = realtimeClient
@@ -208,31 +215,56 @@
 
     /* -------------------------------- groups ------------------------------ */
     async function groupsPage(el) {
-      const [groupsData] = await Promise.all([api('/api/groups'), loadInstances().catch(() => ({ instances: [] }))]);
+      const [groupsData] = await Promise.all([api('/api/groups').catch(() => ({ groups: [] })), loadInstances().catch(() => ({ instances: [] }))]);
       await loadAgents();
-      let groups = groupsData.groups || [];
+
+      let groups = normalizeGroups(groupsData);
+      let syncing = false;
       const selected = new Set();
 
+      function normalizeGroups(payload) {
+        if (!payload || typeof payload !== 'object') return [];
+        const candidates = [payload.groups, payload.data && payload.data.groups, payload.data, payload.result && payload.result.groups, payload.result];
+        const list = candidates.find((item) => Array.isArray(item));
+        return Array.isArray(list) ? list : [];
+      }
+
+      function setText(node, value) {
+        if (node) node.textContent = String(value);
+      }
+
+      const linkedName = state.instances[0]?.name || '';
+      const linkedNumber = instanceNumber(linkedName);
+
       el.innerHTML = '<div class="space-y-5">'
-        + '<div class="' + cardCls + ' p-5"><div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div class="w-full sm:max-w-xs"><label class="' + labelCls + '" for="group-instance">Evolution instance</label><select id="group-instance" class="' + inputCls + '">' + (state.instances.length ? state.instances.map((item) => '<option value="' + esc(item.name) + '">' + esc(item.name) + ' (' + esc(item.status) + ')</option>').join('') : '<option value="">No instance — connect first</option>') + '</select></div><button id="sync-groups" class="' + btnPrimary + '">Sync groups</button></div><p class="mt-3 text-xs text-slate-500 dark:text-slate-400">Groups come from <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">GET /group/fetchAllGroups/:instance</code>. Only groups with a host agent answer messages.</p></div>'
+        + '<div class="' + cardCls + ' p-5"><div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div><p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">WhatsApp account</p><p class="mt-1 text-sm font-bold">' + esc(linkedNumber ? 'Connected as ' + linkedNumber : 'No WhatsApp connected') + '</p></div><button id="sync-groups" class="' + btnPrimary + '">' + (linkedNumber ? 'Sync groups' : 'Connect WhatsApp first') + '</button></div><p class="mt-3 text-xs text-slate-500 dark:text-slate-400">Groups come from <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">GET /group/fetchAllGroups/:instance</code>. Only groups with a host agent answer messages.</p></div>'
         + '<div class="' + cardCls + ' overflow-hidden"><div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4 dark:border-slate-800"><div><h2 class="text-sm font-bold">Synced groups</h2><p class="text-xs text-slate-500 dark:text-slate-400" id="group-count">' + groups.length + ' groups</p></div><div id="bulk-bar" class="hidden flex-wrap items-center gap-2"><span id="bulk-count" class="text-xs font-semibold text-emerald-600 dark:text-emerald-400"></span><select id="bulk-agent" class="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs font-semibold dark:border-slate-700 dark:bg-slate-950"></select><button id="bulk-host" class="' + btnPrimary + ' !py-1.5 !text-xs">Host selected</button></div></div>'
         + '<div id="group-list"></div></div></div>';
 
       const list = $('#group-list', el);
+      const syncButton = $('#sync-groups', el);
+      const countLabel = $('#group-count', el);
       const bulkBar = $('#bulk-bar', el);
       const bulkAgent = $('#bulk-agent', el);
       const bulkCount = $('#bulk-count', el);
 
-      bulkAgent.innerHTML = state.agents.map((agent) => '<option value="' + esc(agent.id) + '">' + esc(agent.name) + '</option>').join('');
+      if (bulkAgent) bulkAgent.innerHTML = state.agents.map((agent) => '<option value="' + esc(agent.id) + '">' + esc(agent.name) + '</option>').join('');
 
       function paint() {
-        $('#group-count', el).textContent = groups.length + ' groups';
-        bulkBar.classList.toggle('hidden', selected.size === 0);
-        bulkBar.classList.toggle('flex', selected.size > 0);
-        bulkCount.textContent = selected.size + ' selected';
+        setText(countLabel, groups.length + ' groups');
+        setText(syncButton, syncing ? 'Syncing…' : (linkedNumber ? 'Sync groups' : 'Connect WhatsApp first'));
+        if (syncButton) syncButton.disabled = syncing;
+
+        if (bulkBar) {
+          bulkBar.classList.toggle('hidden', selected.size === 0);
+          bulkBar.classList.toggle('flex', selected.size > 0);
+        }
+        setText(bulkCount, selected.size + ' selected');
+
+        if (!list) return;
 
         if (!groups.length) {
-          list.innerHTML = '<div class="p-10 text-center"><p class="text-3xl">⊞</p><p class="mt-3 text-sm font-semibold">No groups synced</p><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Pick an instance above and press Sync groups.</p></div>';
+          list.innerHTML = '<div class="p-10 text-center"><p class="text-3xl">⊞</p><p class="mt-3 text-sm font-semibold">No groups synced</p><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">' + (linkedNumber ? 'Press Sync groups to load your WhatsApp groups.' : 'Link your WhatsApp number on the Connect page first.') + '</p></div>';
           return;
         }
 
@@ -290,8 +322,8 @@
       }
 
       async function reload() {
-        const data = await api('/api/groups');
-        groups = data.groups || [];
+        const data = await api('/api/groups').catch(() => ({ groups: [] }));
+        groups = normalizeGroups(data);
         paint();
       }
 
@@ -304,40 +336,43 @@
         } catch (error) { toast(error.message, 'error'); }
       }
 
-      $('#sync-groups', el).addEventListener('click', async (event) => {
-        const instance = $('#group-instance', el).value;
-        if (!instance) return toast('Connect an Evolution instance first', 'error');
-        const button = event.currentTarget;
-        button.disabled = true;
-        button.textContent = 'Syncing…';
-        try {
-          const result = await api('/api/groups/sync', { method: 'POST', body: { instance } });
-          groups = result.groups || [];
-          selected.clear();
+      if (syncButton) {
+        syncButton.addEventListener('click', async () => {
+          if (syncing) return;
+          if (!linkedNumber && !state.instances.length) return toast('Connect your WhatsApp number first', 'error');
+          syncing = true;
           paint();
-          toast('Synced ' + groups.length + ' groups');
-        } catch (error) {
-          toast(error.message, 'error');
-        } finally {
-          button.disabled = false;
-          button.textContent = 'Sync groups';
-        }
-      });
-
-      $('#bulk-host', el).addEventListener('click', async () => {
-        const agentId = bulkAgent.value;
-        if (!agentId) return toast('Select an agent first', 'info');
-        let ok = 0;
-        for (const jid of selected) {
           try {
-            await api('/api/groups/host', { method: 'POST', body: { groupJid: jid, agentId } });
-            ok += 1;
-          } catch (error) { console.warn(error.message); }
-        }
-        selected.clear();
-        await reload();
-        toast('Hosted ' + ok + ' group' + (ok === 1 ? '' : 's'));
-      });
+            const body = linkedNumber ? { number: linkedNumber } : {};
+            const result = await api('/api/groups/sync', { method: 'POST', body });
+            groups = normalizeGroups(result);
+            selected.clear();
+            toast('Synced ' + groups.length + ' groups');
+          } catch (error) {
+            toast(error.message, 'error');
+          } finally {
+            syncing = false;
+            paint();
+          }
+        });
+      }
+
+      if ($('#bulk-host', el)) {
+        $('#bulk-host', el).addEventListener('click', async () => {
+          const agentId = bulkAgent ? bulkAgent.value : '';
+          if (!agentId) return toast('Select an agent first', 'info');
+          let ok = 0;
+          for (const jid of selected) {
+            try {
+              await api('/api/groups/host', { method: 'POST', body: { groupJid: jid, agentId } });
+              ok += 1;
+            } catch (error) { console.warn(error.message); }
+          }
+          selected.clear();
+          await reload();
+          toast('Hosted ' + ok + ' group' + (ok === 1 ? '' : 's'));
+        });
+      }
 
       paint();
     }
