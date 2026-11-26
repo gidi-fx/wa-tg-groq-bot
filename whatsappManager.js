@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import axios from 'axios';
 
-import { askAgent, transcribeAudio } from './agents.js';
+import { askAgent, transcribeAudio, synthesizeSpeech } from './agents.js';
 import { logError } from './logger.js';
 import { normalizePhone, getUserByWaJid, getUserByPhone, saveUser } from './userStore.js';
 
@@ -309,6 +309,40 @@ export async function sendWhatsAppMessage(instance, number, text, options = {}) 
   return response.data;
 }
 
+/**
+ * sendWhatsAppAudio(instance, number, buffer, { quoted, mimetype })
+ * Evolution v2: POST /message/sendWhatsAppAudio/{instance} with base64 audio.
+ * Used to answer a voice note with a voice note (Groq TTS).
+ */
+export async function sendWhatsAppAudio(instance, number, audio, options = {}) {
+  if (!evolutionConfigured()) throw new Error('Evolution API is not configured');
+  const target = String(number || '').trim();
+  if (!target) throw new Error('number is required');
+
+  const buffer = Buffer.isBuffer(audio) ? audio : Buffer.from(audio || '');
+  if (!buffer.length) throw new Error('audio is required');
+
+  const body = {
+    number: target,
+    audio: buffer.toString('base64'),
+    encoding: true,
+    mimetype: options.mimetype || 'audio/ogg; codecs=opus',
+  };
+  if (options.quoted && options.quoted.key) {
+    body.quoted = options.quoted.message
+      ? options.quoted
+      : { key: options.quoted.key };
+  }
+
+  console.log(`[whatsapp] sending voice note (${buffer.length} bytes) to ${target} via ${instance || 'any'}`);
+  const response = await axios.post(
+    `${EVOLUTION_API_URL}/message/sendWhatsAppAudio/${instancePath(instance)}`,
+    body,
+    { headers: headers(), timeout: 60000 },
+  );
+  return response.data;
+}
+
 const MESSAGE_TYPES = [
   'conversation',
   'extendedTextMessage',
@@ -433,16 +467,34 @@ function delay(ms) {
 }
 
 /** Default handler: typing indicator, Groq reply, then a quoted reply. */
-export async function defaultMessageHandler({ instance, phone, text, quoted }) {
+export async function defaultMessageHandler({ instance, phone, text, quoted, isVoice }) {
   await sendPresence(instance, phone, 'composing');
   const startedAt = Date.now();
   try {
     const reply = await askAgent(phone, text, 'whatsapp');
+
+    // Voice note in -> voice note out. TTS runs while the typing indicator is
+    // still on; if it fails the reply goes out as text instead.
+    let voice = null;
+    if (isVoice) {
+      try {
+        voice = await synthesizeSpeech(reply);
+      } catch (err) {
+        logError(`[whatsapp] TTS reply failed for ${phone} - sending text instead`, err);
+      }
+    }
+
     const elapsed = Date.now() - startedAt;
     if (elapsed < 2500) await delay(2500 - elapsed);
     await sendPresence(instance, phone, 'paused');
-    await sendWhatsAppMessage(instance, phone, reply, { quoted });
-    console.log(`[whatsapp] replied to ${phone} via ${instance || 'any'}: ${reply.slice(0, 120)}`);
+
+    if (voice) {
+      await sendWhatsAppAudio(instance, phone, voice.buffer, { quoted, mimetype: voice.mimetype });
+      console.log(`[whatsapp] replied to ${phone} via ${instance || 'any'} (voice): ${reply.slice(0, 120)}`);
+    } else {
+      await sendWhatsAppMessage(instance, phone, reply, { quoted });
+      console.log(`[whatsapp] replied to ${phone} via ${instance || 'any'}: ${reply.slice(0, 120)}`);
+    }
     return reply;
   } catch (err) {
     await sendPresence(instance, phone, 'paused');
