@@ -43,6 +43,18 @@ function headers() {
   return { apikey: EVOLUTION_API_KEY, 'Content-Type': 'application/json' };
 }
 
+/** JSON for logs with credentials redacted. The apikey is never printed. */
+function safeLog(value) {
+  try {
+    const cleaned = JSON.stringify(value, (key, inner) =>
+      /apikey|api_key|authorization|token/i.test(key) ? '***' : inner,
+    );
+    return String(cleaned ?? value).slice(0, 4000);
+  } catch {
+    return String(value).slice(0, 4000);
+  }
+}
+
 async function call(method, path, data, timeout = 30000) {
   requireEvolution();
   try {
@@ -144,53 +156,40 @@ export async function ensureInstance(instanceName, webhookUrl) {
 }
 
 /**
- * Ask Evolution for a connection payload (QR and/or pairing code).
+ * Ask Evolution for a connect payload (pairing code and/or QR).
  *
- * Newer Evolution builds only accept POST /instance/connect/:instance with
- * { number } in the body — a GET returns the QR alone and pairingCode stays null.
- * So: POST with the number first, then fall back to GET for older builds.
+ * Evolution v2.3.8 only exposes GET /instance/connect/:instance?number=<digits>.
+ * The POST variant 404s on every call, and only the GET response carries
+ * `pairingCode`. `code` in that response is the raw QR string, never the
+ * pairing code, so it is deliberately ignored here.
+ *
+ * The pairing code may contain letters (e.g. "6DAQQ8N2"), so it is returned
+ * exactly as Evolution sent it - never digit-filtered.
+ *
+ * Call this ONCE per pairing attempt: a second call invalidates the first code.
  */
 export async function connectInstance(instance, number) {
   const digitsOnly = number ? String(number).replace(/\D/g, '') : '';
-  const path = `/instance/connect/${instancePath(instance)}`;
+  const query = digitsOnly ? `?number=${encodeURIComponent(digitsOnly)}` : '';
+  const path = `/instance/connect/${instancePath(instance)}${query}`;
 
-  let data = null;
-  try {
-    console.log(`[evolution] POST ${path} number=${digitsOnly || '(none)'}`);
-    data = await call('POST', path, digitsOnly ? { number: digitsOnly } : {}, 45000);
-  } catch (postErr) {
-    const query = digitsOnly ? `?number=${encodeURIComponent(digitsOnly)}` : '';
-    console.log(`[evolution] POST connect failed (${postErr.message}) - retrying GET ${path}${query}`);
-    data = await call('GET', `${path}${query}`, undefined, 30000);
-  }
+  console.log(`[evolution] GET ${path}`);
+  const data = await call('GET', path, undefined, 45000);
 
-  console.log('[evolution] connect response:', JSON.stringify(data)?.slice(0, 4000));
+  // Raw response for debugging. safeLog redacts any credential-looking field.
+  console.log('[evolution] connect raw response:', safeLog(data));
 
-  const qr = data?.qrcode && typeof data.qrcode === 'object' ? data.qrcode : {};
-  const inner = data?.data && typeof data.data === 'object' ? data.data : {};
-  const rawCode = data?.pairingCode
-    || inner.pairingCode
-    || data?.code
-    || inner.code
-    || qr.pairingCode
-    || qr.code
-    || data?.instance?.pairingCode
-    || null;
-  const rawBase64 = data?.base64
-    || inner.base64
-    || qr.base64
-    || inner.qrcode?.base64
-    || data?.instance?.qrcode?.base64
-    || null;
-  const codeDigits = rawCode ? String(rawCode).replace(/\D/g, '') : '';
+  const pairingCode = data?.pairingCode ? String(data.pairingCode).trim() : null;
+  const qrBase64 = data?.base64 ? String(data.base64) : null;
 
   return {
     instance,
     number: digitsOnly || instanceNumber(instance),
-    state: data?.state || inner.state || data?.instance?.state || null,
-    base64: rawBase64,
-    pairingCode: codeDigits.length === 8 ? codeDigits : null,
-    count: qr.count ?? data?.count ?? inner.count ?? null,
+    state: data?.state || data?.instance?.state || null,
+    pairingCode: pairingCode || null, // exactly as returned, letters allowed
+    qr: pairingCode ? null : qrBase64, // QR fallback only when no pairing code
+    base64: qrBase64, // kept for the QR panel
+    count: data?.count ?? null,
   };
 }
 
@@ -200,10 +199,18 @@ export async function getInstanceStatus(instance) {
     const state = data?.instance?.state || data?.state || 'unknown';
     return { instance, state, connected: /open|connected/i.test(String(state)) };
   } catch (err) {
+    // A 404 means the instance does not exist yet. That is a normal state while
+    // the user is still linking, not an error, so it is not logged as one.
+    if (err?.details?.status === 404 || err?.status === 404) {
+      return { instance, state: 'not_found', connected: false, exists: false };
+    }
     const list = await fetchInstances().catch(() => []);
     const match = list.find((item) => item.name === instance);
     if (match) {
       return { instance, state: match.status, connected: /open|connected/i.test(String(match.status)) };
+    }
+    if (/404/.test(String(err?.message || ''))) {
+      return { instance, state: 'not_found', connected: false, exists: false };
     }
     throw err;
   }
