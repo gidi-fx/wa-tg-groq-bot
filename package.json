@@ -1,1 +1,18 @@
-ewogICJuYW1lIjogIndoYXRzYXBwLWdyb3Etcm91dGVyLXYyIiwKICAidmVyc2lvbiI6ICIyLjAuMCIsCiAgInByaXZhdGUiOiB0cnVlLAogICJkZXNjcmlwdGlvbiI6ICJXaGF0c0FwcCBHcm9xIFJvdXRlciB2MiAtIG11bHRpLWFnZW50IFdoYXRzQXBwIHJvdXRlciB3aXRoIFN1cGFiYXNlLCBFdm9sdXRpb24gQVBJIHYyLCBHcm9xIGFuZCBPcGVuUm91dGVyIChCWU9LKS4gVGVsZWdyYW0gTVRQcm90byDJb21a... (truncated - full base64 in file)
+{
+  "name": "wa-groq-bot",
+  "version": "2.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "axios": "^1.6.2",
+    "@supabase/supabase-js": "^2.39.0",
+    "multer": "^2.0.1"
+  }
+}
