@@ -1,5 +1,6 @@
 import 'dotenv/config';
 
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -56,6 +57,7 @@ import { MEMORY_WARNING, memoryCounts, memorySnapshot } from './memory.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+const DIST_DIR = path.join(__dirname, '..', 'dist');
 
 const PORT = Number(process.env.PORT || 3000);
 const TELEGRAM_MESSAGE = 'Telegram MTProto Coming Soon (Disabled)';
@@ -70,6 +72,10 @@ app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 app.use(express.static(PUBLIC_DIR, { index: false }));
+// Optional prebuilt asset output (only used when a `dist` build exists).
+if (fs.existsSync(DIST_DIR)) {
+  app.use(express.static(DIST_DIR, { index: false }));
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -203,6 +209,17 @@ async function publicAgent(agent) {
 }
 
 /* --------------------------------- status --------------------------------- */
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    ok: true,
+    hasSupabase: isSupabaseConfigured(),
+    persistence: isSupabaseConfigured() ? 'supabase' : 'memory',
+    uptime: Math.round(process.uptime()),
+    telegram: TELEGRAM_MESSAGE,
+  });
+});
 
 app.get('/health', (req, res) => {
   res.json({
