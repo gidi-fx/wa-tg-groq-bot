@@ -12,13 +12,16 @@ import { AppError, errorMessage } from './errors.js';
 import {
   buildMessages,
   callAI,
+  DEFAULT_MODEL,
   extractMediaRequest,
   synthesizeSpeech,
   transcribeAudio,
+  TRANSCRIBE_MODEL,
   TTS_MODEL,
+  TTS_VOICE,
 } from './ai.js';
 import * as evo from './evolution.js';
-import { getModelReport, startModelTests } from './models.js';
+import { getModelReport, getOpenRouterCatalog, isAllowedGroqModel, startModelTests } from './models.js';
 import {
   addAgentMedia,
   agentMediaBuffer,
@@ -77,6 +80,13 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: UPLOAD_LIMIT, files: 10 },
 });
+
+/**
+ * Latest QR / pairing payload pushed by Evolution webhooks, per instance.
+ * `qrcode.updated` is NOT ignored any more: it is the only reliable way to get
+ * a real pairingCode, because /instance/connect often returns the QR only.
+ */
+const LATEST_QR = new Map();
 
 /* -------------------------------- helpers --------------------------------- */
 
@@ -191,9 +201,17 @@ function timestampToIso(value) {
 
 function validateModel(model) {
   const value = String(model || '').trim();
-  if (!value) return 'groq/llama-3.3-70b-versatile';
+  if (!value) return DEFAULT_MODEL;
   if (!/^(groq|openrouter)\//.test(value)) {
     throw new AppError('Model must start with "groq/" or "openrouter/"', 400, 'invalid_model');
+  }
+  // Groq is locked to the two allowed gpt-oss models.
+  if (value.startsWith('groq/') && !isAllowedGroqModel(value)) {
+    throw new AppError(
+      'Groq only supports groq/openai/gpt-oss-120b and groq/openai/gpt-oss-20b. Use openrouter/<any-model> for other models.',
+      400,
+      'groq_model_not_allowed',
+    );
   }
   return value;
 }
@@ -266,6 +284,9 @@ app.get(
         groq: Boolean(process.env.GROQ_API_KEY),
         openrouter: Boolean(process.env.OPENROUTER_API_KEY),
         tts: TTS_MODEL,
+        ttsVoice: TTS_VOICE,
+        stt: TRANSCRIBE_MODEL,
+        defaultModel: DEFAULT_MODEL,
         keysSource: 'server-env',
       },
       realtime: {
@@ -286,7 +307,56 @@ app.get(
   }),
 );
 
-/** Real test run: every Groq model id gets an actual chat completion request. */
+/** Full OpenRouter catalog for the searchable model picker. */
+app.get(
+  '/api/openrouter/models',
+  asyncRoute(async (req, res) => {
+    const catalog = await getOpenRouterCatalog({ refresh: req.query.refresh === '1' });
+    res.json({ ...catalog, count: catalog.models?.length || 0 });
+  }),
+);
+
+/**
+ * Speech to text with Groq Whisper.
+ * Accepts multipart (field "file") or JSON { audioBase64, fileName, mimetype }.
+ */
+app.post(
+  '/api/transcribe',
+  upload.single('file'),
+  asyncRoute(async (req, res) => {
+    const body = req.body || {};
+    let buffer = null;
+    let fileName = 'audio.ogg';
+    let mimetype = 'audio/ogg';
+
+    if (req.file?.buffer?.length) {
+      buffer = req.file.buffer;
+      fileName = req.file.originalname || fileName;
+      mimetype = req.file.mimetype || mimetype;
+    } else if (body.audioBase64) {
+      const raw = String(body.audioBase64);
+      buffer = Buffer.from(raw.startsWith('data:') ? raw.slice(raw.indexOf(',') + 1) : raw, 'base64');
+      fileName = String(body.fileName || fileName);
+      mimetype = String(body.mimetype || mimetype);
+    } else if (body.audioUrl) {
+      const response = await fetch(String(body.audioUrl));
+      if (!response.ok) throw new AppError(`Could not download audio (${response.status})`, 400, 'audio_download_failed');
+      buffer = Buffer.from(await response.arrayBuffer());
+      fileName = String(body.fileName || 'audio.ogg');
+      mimetype = String(body.mimetype || response.headers.get('content-type') || 'audio/ogg');
+    }
+
+    if (!buffer || !buffer.length) {
+      throw new AppError('Send a file field, audioBase64 or audioUrl', 400, 'missing_audio');
+    }
+
+    const result = await transcribeAudio(buffer, fileName, mimetype);
+    console.log(`[transcribe] ${fileName}: ${result.text.slice(0, 120)}`);
+    res.json({ ok: true, text: result.text, model: result.model });
+  }),
+);
+
+/** Real test run: only the 2 allowed Groq models get a chat completion request. */
 app.post(
   '/api/test-groq-models',
   asyncRoute(async (req, res) => {
@@ -438,7 +508,20 @@ const connectInstanceHandler = asyncRoute(async (req, res) => {
   const webhookUrl = `${baseUrl(req)}/webhook/${encodeURIComponent(instance)}`;
   const ensured = await evo.ensureInstance(instance, webhookUrl);
   const data = await evo.connectInstance(instance, number);
-  res.json({ ok: true, ...data, created: ensured.created });
+
+  // The webhook may already have pushed a pairing code; prefer the freshest one.
+  const pushed = LATEST_QR.get(instance);
+  const pairingCode = data.pairingCode || pushed?.pairingCode || null;
+  const base64 = data.base64 || pushed?.base64 || null;
+
+  res.json({
+    ok: true,
+    ...data,
+    pairingCode,
+    base64,
+    created: ensured.created,
+    source: data.pairingCode ? 'connect' : pushed?.pairingCode ? 'webhook' : null,
+  });
 });
 
 // Public aliases documented for Evolution-style integrations.
@@ -446,8 +529,36 @@ app.post('/api/instance/create', createInstanceHandler);
 app.post('/instance/create', createInstanceHandler);
 app.post('/api/instance/connect', connectInstanceHandler);
 app.get('/api/instance/connect', connectInstanceHandler);
+app.post('/api/instance/connect/:instance', connectInstanceHandler);
 app.get('/api/instance/connect/:instance', connectInstanceHandler);
+app.post('/instance/connect/:instance', connectInstanceHandler);
 app.get('/instance/connect/:instance', connectInstanceHandler);
+
+/** Latest QR / pairing code pushed by the Evolution webhook for an instance. */
+app.get(
+  '/api/instance/qr/:instance',
+  asyncRoute(async (req, res) => {
+    const instance = String(req.params.instance || '').trim();
+    const cached = LATEST_QR.get(instance) || null;
+    if (cached) return res.json({ ok: true, instance, ...cached });
+
+    // Nothing pushed yet - ask Evolution directly.
+    try {
+      const data = await evo.connectInstance(instance, '');
+      res.json({
+        ok: true,
+        instance,
+        pairingCode: data.pairingCode || null,
+        base64: data.base64 || null,
+        code: null,
+        source: 'connect',
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.json({ ok: true, instance, pairingCode: null, base64: null, code: null, error: err.message });
+    }
+  }),
+);
 
 app.get(
   '/api/instance/status/:instance',
@@ -475,12 +586,42 @@ app.get('/webhook/:instance', (req, res) => {
   res.json({
     ok: true,
     webhook: `${baseUrl(req)}/webhook/${req.params.instance}`,
-    events: ['MESSAGES_UPSERT'],
+    events: ['MESSAGES_UPSERT', 'QRCODE_UPDATED', 'CONNECTION_UPDATE'],
   });
 });
 
 async function handleWebhook(instance, payload) {
   const event = String(payload.event || payload.type || '').toLowerCase();
+  const instanceName = payload.instance || payload.instanceName || instance || 'unknown';
+
+  // QR + pairing code events must be kept: this is where pairingCode really comes from.
+  if (event.includes('qrcode') || event.includes('qr')) {
+    const data = payload.data && typeof payload.data === 'object' ? payload.data : payload;
+    const qr = data.qrcode && typeof data.qrcode === 'object' ? data.qrcode : data;
+    const rawCode = qr.pairingCode ?? data.pairingCode ?? qr.code ?? qr.qrcode ?? null;
+    const codeDigits = rawCode ? String(rawCode).replace(/\D/g, '') : '';
+    const record = {
+      pairingCode: codeDigits.length === 8 ? codeDigits : null,
+      code: rawCode ? String(rawCode) : null,
+      base64: qr.base64 || data.base64 || null,
+      count: qr.count ?? data.count ?? null,
+      updatedAt: new Date().toISOString(),
+    };
+    LATEST_QR.set(instanceName, record);
+    console.log(
+      `[webhook] qrcode.updated ${instanceName}: pairingCode=${record.pairingCode || 'none'} base64=${record.base64 ? 'yes' : 'no'}`,
+    );
+    return;
+  }
+
+  if (event.includes('connection')) {
+    const data = payload.data && typeof payload.data === 'object' ? payload.data : payload;
+    const connectionState = String(data.state || data.connectionStatus || '').toLowerCase();
+    console.log(`[webhook] connection.update ${instanceName}: ${connectionState || 'unknown'}`);
+    if (/open|connected/.test(connectionState)) LATEST_QR.delete(instanceName);
+    return;
+  }
+
   if (event && !event.includes('messages.upsert')) {
     console.log(`[webhook] ignored event ${event || 'unknown'}`);
     return;
@@ -493,7 +634,6 @@ async function handleWebhook(instance, payload) {
   const remoteJid = String(key.remoteJid || data.remoteJid || '');
   if (!remoteJid || remoteJid === 'status@broadcast' || remoteJid.endsWith('@broadcast')) return;
 
-  const instanceName = payload.instance || payload.instanceName || instance || 'unknown';
   const rawMessage = data.message || {};
   const message = unwrapMessage(rawMessage);
   const messageType = detectMessageType(message);
@@ -536,9 +676,9 @@ async function handleWebhook(instance, payload) {
         if (media.kind === 'audio') {
           try {
             const transcript = await transcribeAudio(buffer, media.fileName, media.mimetype);
-            if (transcript) {
-              content = transcript;
-              console.log(`[webhook] voice transcribed: ${transcript.slice(0, 120)}`);
+            if (transcript.text) {
+              content = transcript.text;
+              console.log(`[webhook] voice transcribed (${transcript.model}): ${transcript.text.slice(0, 120)}`);
             }
           } catch (err) {
             console.error(`[webhook] transcription failed: ${err.message}`);
@@ -862,7 +1002,7 @@ app.post(
         + 'Only reply when a message is addressed to you or clearly needs the group assistant.',
       voiceEnabled: false,
       mediaEnabled: false,
-      model: 'groq/llama-3.3-70b-versatile',
+      model: DEFAULT_MODEL,
       connectedInstance: connected.name,
     });
 
