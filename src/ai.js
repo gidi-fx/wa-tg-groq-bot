@@ -4,9 +4,14 @@ const GROQ_BASE = String(process.env.GROQ_BASE_URL || 'https://api.groq.com/open
 const OPENROUTER_BASE = String(process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/+$/, '');
 
 export const TRANSCRIBE_MODEL = String(process.env.GROQ_TRANSCRIBE_MODEL || 'whisper-large-v3');
-export const TTS_MODEL = String(process.env.GROQ_TTS_MODEL || 'playai-tts');
-export const TTS_VOICE = String(process.env.GROQ_TTS_VOICE || 'Fritz-PlayAI');
-export const FALLBACK_MODEL = 'groq/llama-3.1-8b-instant';
+export const TRANSCRIBE_FALLBACK_MODEL = String(process.env.GROQ_TRANSCRIBE_FALLBACK_MODEL || 'whisper-large-v3-turbo');
+// Groq retired playai-tts on 2025-12-31; Orpheus (Canopy Labs) is the current TTS family.
+export const TTS_MODEL = String(process.env.GROQ_TTS_MODEL || 'canopylabs/orpheus-v1-english');
+export const TTS_VOICE = String(process.env.GROQ_TTS_VOICE || 'troy');
+export const TTS_FORMAT = String(process.env.GROQ_TTS_FORMAT || 'wav');
+export const GROQ_MODEL_IDS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'];
+export const DEFAULT_MODEL = 'groq/openai/gpt-oss-120b';
+export const FALLBACK_MODEL = 'groq/openai/gpt-oss-20b';
 
 const TTS_MIME = {
   ogg: 'audio/ogg; codecs=opus',
@@ -116,18 +121,36 @@ async function requestChat({ model, messages, temperature, maxTokens }) {
         'missing_groq_key',
       );
     }
-    const payload = await postJSON(
-      `${GROQ_BASE}/chat/completions`,
-      {
-        model: parsed.id,
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-      },
-      { Authorization: `Bearer ${key}` },
-      'Groq',
-    );
-    return { payload, provider: 'groq', model: parsed.full };
+
+    // Groq accepts both "openai/gpt-oss-120b" and the bare "gpt-oss-120b".
+    // Try the id as given, then the same id without the openai/ prefix.
+    const candidates = [parsed.id];
+    if (/^openai\//.test(parsed.id)) candidates.push(parsed.id.replace(/^openai\//, ''));
+
+    let lastError = null;
+    for (const modelId of candidates) {
+      try {
+        const payload = await postJSON(
+          `${GROQ_BASE}/chat/completions`,
+          {
+            model: modelId,
+            messages,
+            temperature,
+            max_tokens: maxTokens,
+          },
+          { Authorization: `Bearer ${key}` },
+          'Groq',
+        );
+        return { payload, provider: 'groq', model: `groq/${modelId}` };
+      } catch (err) {
+        lastError = err;
+        // Only retry the bare id when Groq says the model does not exist.
+        const modelMissing = /model.*(does not exist|not found|decommissioned|invalid)/i.test(err.message || '');
+        if (modelId === candidates[candidates.length - 1] || !modelMissing) throw err;
+        console.warn(`[ai] Groq model ${modelId} unavailable, retrying without prefix`);
+      }
+    }
+    throw lastError;
   }
 
   const key = String(process.env.OPENROUTER_API_KEY || '').trim();
@@ -161,7 +184,7 @@ async function requestChat({ model, messages, temperature, maxTokens }) {
 
 /**
  * Call the selected model, with the required fallback chain:
- * selected -> groq/llama-3.1-8b-instant -> error message.
+ * selected -> groq/openai/gpt-oss-20b -> error message.
  */
 export async function callAI({ model, messages, temperature = 0.7, maxTokens = 800 }) {
   const selected = parseModelId(model).full;
@@ -216,38 +239,55 @@ function parsedProvider(model) {
   return parseModelId(model).provider;
 }
 
-/** Groq Whisper transcription. Node 18+ FormData/Blob keeps this dependency-free. */
+/**
+ * Groq Whisper speech-to-text.
+ * Tries whisper-large-v3 first, then whisper-large-v3-turbo.
+ * Node 18+ FormData/Blob keeps this dependency-free.
+ */
 export async function transcribeAudio(buffer, fileName = 'audio.ogg', mimetype = 'audio/ogg') {
   const key = String(process.env.GROQ_API_KEY || '').trim();
   if (!key) throw new AppError('GROQ_API_KEY is not configured on the server (voice transcription)', 503, 'missing_groq_key');
   if (!Buffer.isBuffer(buffer) || !buffer.length) throw new AppError('Empty audio file', 400, 'empty_audio');
 
-  const form = new FormData();
-  form.append('file', new Blob([buffer], { type: mimetype }), fileName);
-  form.append('model', TRANSCRIBE_MODEL);
-  form.append('response_format', 'json');
+  const models = [TRANSCRIBE_MODEL, TRANSCRIBE_FALLBACK_MODEL]
+    .filter((model, index, list) => model && list.indexOf(model) === index);
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60000);
-  try {
-    const response = await fetch(`${GROQ_BASE}/audio/transcriptions`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${key}` },
-      body: form,
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      throw new AppError(`Transcription failed (${response.status}): ${text.slice(0, 200)}`, 502, 'transcription_failed');
+  let lastError = null;
+  for (const model of models) {
+    const form = new FormData();
+    form.append('file', new Blob([buffer], { type: mimetype }), fileName);
+    form.append('model', model);
+    form.append('response_format', 'json');
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60000);
+    try {
+      const response = await fetch(`${GROQ_BASE}/audio/transcriptions`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}` },
+        body: form,
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        lastError = new AppError(`Transcription failed (${response.status}): ${text.slice(0, 200)}`, 502, 'transcription_failed');
+        console.warn(`[stt] ${model} failed (${response.status}) - trying next model`);
+        continue;
+      }
+      const payload = text ? JSON.parse(text) : {};
+      return { text: String(payload.text || '').trim(), model };
+    } catch (err) {
+      if (err instanceof AppError) {
+        lastError = err;
+        continue;
+      }
+      lastError = new AppError(`Transcription request failed: ${errorMessage(err)}`, 502, 'transcription_failed');
+    } finally {
+      clearTimeout(timer);
     }
-    const payload = text ? JSON.parse(text) : {};
-    return String(payload.text || '').trim();
-  } catch (err) {
-    if (err instanceof AppError) throw err;
-    throw new AppError(`Transcription request failed: ${errorMessage(err)}`, 502, 'transcription_failed');
-  } finally {
-    clearTimeout(timer);
   }
+
+  throw lastError || new AppError('Transcription failed', 502, 'transcription_failed');
 }
 
 /**
@@ -286,24 +326,38 @@ export async function synthesizeSpeech(text) {
   const key = String(process.env.GROQ_API_KEY || '').trim();
   if (!key) throw new AppError('GROQ_API_KEY is not configured on the server (voice replies)', 503, 'missing_groq_key');
 
-  const format = String(process.env.GROQ_TTS_FORMAT || 'ogg');
-  const response = await fetch(`${GROQ_BASE}/audio/speech`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-    body: JSON.stringify({
-      model: TTS_MODEL,
-      voice: TTS_VOICE,
-      input: input.slice(0, 3500),
-      response_format: format,
-    }),
-  });
+  // Groq TTS = Canopy Labs Orpheus (playai-tts was retired 2025-12-31).
+  const formats = [TTS_FORMAT, 'wav'].filter((value, index, list) => value && list.indexOf(value) === index);
+  let lastError = null;
 
-  if (!response.ok) {
-    throw new AppError(`Groq TTS failed (${response.status}): ${(await response.text()).slice(0, 200)}`, 502, 'tts_failed');
+  for (const format of formats) {
+    const response = await fetch(`${GROQ_BASE}/audio/speech`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: TTS_MODEL,
+        voice: TTS_VOICE,
+        input: input.slice(0, 3500),
+        response_format: format,
+      }),
+    });
+
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 300);
+      lastError = new AppError(`Groq TTS failed (${response.status}): ${detail}`, 502, 'tts_failed');
+      console.warn(`[tts] Groq ${format} failed (${response.status}): ${detail.slice(0, 160)}`);
+      continue;
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!buffer.length) {
+      lastError = new AppError('Groq TTS returned empty audio', 502, 'tts_failed');
+      continue;
+    }
+    return { buffer, mimetype: TTS_MIME[format] || 'audio/wav', provider: 'groq', model: TTS_MODEL, voice: TTS_VOICE };
   }
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (!buffer.length) throw new AppError('Groq TTS returned empty audio', 502, 'tts_failed');
-  return { buffer, mimetype: TTS_MIME[format] || 'audio/ogg', provider: 'groq' };
+
+  throw lastError || new AppError('Groq TTS failed', 502, 'tts_failed');
 }
 
 /** Pull an optional [[SEND_MEDIA: file]] instruction out of the model reply. */
