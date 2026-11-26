@@ -143,11 +143,27 @@ export async function ensureInstance(instanceName, webhookUrl) {
   return { instance: name, created: true, webhook: created.webhook };
 }
 
+/**
+ * Ask Evolution for a connection payload (QR and/or pairing code).
+ *
+ * Newer Evolution builds only accept POST /instance/connect/:instance with
+ * { number } in the body — a GET returns the QR alone and pairingCode stays null.
+ * So: POST with the number first, then fall back to GET for older builds.
+ */
 export async function connectInstance(instance, number) {
   const digitsOnly = number ? String(number).replace(/\D/g, '') : '';
-  const query = digitsOnly ? `?number=${encodeURIComponent(digitsOnly)}` : '';
-  console.log(`[evolution] GET /instance/connect/${instance}${query}`);
-  const data = await call('GET', `/instance/connect/${instancePath(instance)}${query}`, undefined, 30000);
+  const path = `/instance/connect/${instancePath(instance)}`;
+
+  let data = null;
+  try {
+    console.log(`[evolution] POST ${path} number=${digitsOnly || '(none)'}`);
+    data = await call('POST', path, digitsOnly ? { number: digitsOnly } : {}, 45000);
+  } catch (postErr) {
+    const query = digitsOnly ? `?number=${encodeURIComponent(digitsOnly)}` : '';
+    console.log(`[evolution] POST connect failed (${postErr.message}) - retrying GET ${path}${query}`);
+    data = await call('GET', `${path}${query}`, undefined, 30000);
+  }
+
   console.log('[evolution] connect response:', JSON.stringify(data)?.slice(0, 4000));
 
   const qr = data?.qrcode && typeof data.qrcode === 'object' ? data.qrcode : {};
