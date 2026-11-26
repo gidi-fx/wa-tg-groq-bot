@@ -14,7 +14,7 @@ import {
 
 const AGENT_COLUMNS =
   'id,name,instruction,voice_enabled,media_enabled,model,media_files,connected_instance,created_at';
-const DEFAULT_MODEL = 'groq/llama-3.3-70b-versatile';
+const DEFAULT_MODEL = 'groq/openai/gpt-oss-120b';
 const DEFAULT_INSTRUCTION =
   'You are a helpful WhatsApp assistant. Answer clearly, keep replies short and use plain text.';
 
