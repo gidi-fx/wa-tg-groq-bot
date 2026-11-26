@@ -1,6 +1,11 @@
-/** Live model testing.
- * Nothing here is a hardcoded catalog: every model shown in the UI has just been asked to complete a real chat request with the server's own API keys.
- * Results are cached for one hour and refreshed on demand.
+/**
+ * Model catalog + live testing.
+ *
+ * Groq: EXACTLY two models are allowed (gpt-oss-120b, gpt-oss-20b). Nothing else
+ * is listed or selectable. Each id is probed with and without the `openai/` prefix.
+ *
+ * OpenRouter: the full catalog is exposed so the UI can search it, and the user
+ * may also type any model id by hand.
  */
 const GROQ_BASE = String(process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
 const OPENROUTER_BASE = String(process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/+$/, '');
@@ -8,31 +13,33 @@ const OPENROUTER_BASE = String(process.env.OPENROUTER_BASE_URL || 'https://openr
 const CACHE_MS = 60 * 60 * 1000;
 const TEST_TIMEOUT_MS = 20000;
 const LIST_TIMEOUT_MS = 15000;
-const TEST_CONCURRENCY = 6;
+const GROQ_TEST_CONCURRENCY = 2;
 const OPENROUTER_TEST_LIMIT = 15;
 
-/** Groq's free tier is the Llama 3.x / Mixtral / Gemma family; everything else bills. */
-const FREE_MODEL_PATTERN = /^(llama-?3|mixtral|gemma)/i;
+/** The only Groq models this app allows, with their UI labels. */
+export const GROQ_MODELS = [
+  {
+    id: 'groq/openai/gpt-oss-120b',
+    apiId: 'openai/gpt-oss-120b',
+    label: '1. gpt-oss-120b - BEST (Sales/Coding)',
+  },
+  {
+    id: 'groq/openai/gpt-oss-20b',
+    apiId: 'openai/gpt-oss-20b',
+    label: '2. gpt-oss-20b - FASTEST',
+  },
+];
+
+const GROQ_ALLOWED = new Set(GROQ_MODELS.map((model) => model.id));
 
 const state = {
   groq: { at: 0, models: null, error: null, running: null },
   openrouter: { at: 0, models: null, error: null, running: null },
+  openrouterCatalog: { at: 0, models: null, running: null },
 };
 
-function prettyName(apiId) {
-  const cleaned = String(apiId || '').split('/').pop().replace(/:free$/, '');
-  return cleaned
-    .split('-')
-    .map((part) => (/^\d/.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1)))
-    .join(' ');
-}
-
-function tierFor(apiId) {
-  return FREE_MODEL_PATTERN.test(String(apiId || '')) ? 'FREE' : 'PAID';
-}
-
-function priceLabelFor(tier) {
-  return tier === 'FREE' ? 'Free (Groq free tier)' : 'Paid (Groq billing)';
+export function isAllowedGroqModel(id) {
+  return GROQ_ALLOWED.has(String(id || ''));
 }
 
 async function mapLimit(items, limit, worker) {
@@ -53,6 +60,15 @@ async function mapLimit(items, limit, worker) {
   return results;
 }
 
+async function readJSON(response) {
+  const text = await response.text();
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Real chat completion: HTTP 200 with non-empty content means the model replies. */
 async function probeChat({ url, apiId, headers, label }) {
   const started = Date.now();
@@ -69,13 +85,7 @@ async function probeChat({ url, apiId, headers, label }) {
       }),
       signal: controller.signal,
     });
-    const text = await response.text();
-    let payload = null;
-    try {
-      payload = text ? JSON.parse(text) : null;
-    } catch {
-      payload = null;
-    }
+    const payload = await readJSON(response);
     const content = payload?.choices?.[0]?.message?.content;
     const working = response.ok && typeof content === 'string' && content.trim().length > 0;
     return {
@@ -83,7 +93,8 @@ async function probeChat({ url, apiId, headers, label }) {
       latency: Date.now() - started,
       error: working
         ? null
-        : String(payload?.error?.message || payload?.message || text || `HTTP ${response.status}`).slice(0, 220),
+        : String(payload?.error?.message || payload?.message || `HTTP ${response.status}`).slice(0, 220),
+      status: response.status,
       label,
     };
   } catch (err) {
@@ -91,6 +102,7 @@ async function probeChat({ url, apiId, headers, label }) {
       working: false,
       latency: Date.now() - started,
       error: err.name === 'AbortError' ? `${label} timed out after ${TEST_TIMEOUT_MS}ms` : String(err.message || err).slice(0, 220),
+      status: 0,
       label,
     };
   } finally {
@@ -98,14 +110,14 @@ async function probeChat({ url, apiId, headers, label }) {
   }
 }
 
-function entry({ provider, apiId, displayName, tier, working, latency, error }) {
+function entry({ provider, id, apiId, displayName, tier, working, latency, error }) {
   return {
-    id: `${provider}/${apiId}`,
+    id,
     provider,
     apiId,
-    displayName: displayName || prettyName(apiId),
+    displayName,
     tier,
-    price: priceLabelFor(tier),
+    price: tier === 'FREE' ? 'Free (Groq free tier)' : 'Paid',
     working: Boolean(working),
     status: working ? 'working' : 'failed',
     latency: Number.isFinite(latency) ? latency : null,
@@ -113,99 +125,115 @@ function entry({ provider, apiId, displayName, tier, working, latency, error }) 
   };
 }
 
-async function listGroqModelIds(apiKey) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), LIST_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${GROQ_BASE}/models`, {
-      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    let payload = null;
-    try {
-      payload = text ? JSON.parse(text) : null;
-    } catch {
-      payload = null;
-    }
-    if (!response.ok) {
-      throw new Error(`Groq models returned ${response.status}: ${String(payload?.error?.message || text).slice(0, 200)}`);
-    }
-    const list = Array.isArray(payload?.data) ? payload.data : [];
-    return list.filter((model) => model && model.id && model.active !== false).map((model) => ({ id: model.id }));
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
+/**
+ * Groq: probe the 2 allowed models only.
+ * Each is tried as `openai/gpt-oss-...` and then as bare `gpt-oss-...`.
+ */
 async function runGroqTests() {
   const apiKey = String(process.env.GROQ_API_KEY || '').trim();
-  const startedAt = new Date().toISOString();
+
+  const build = (model, working, latency, error) => entry({
+    provider: 'groq',
+    id: model.id,
+    apiId: model.apiId,
+    displayName: model.label,
+    tier: 'FREE',
+    working,
+    latency,
+    error,
+  });
 
   if (!apiKey) {
-    state.groq = { at: Date.now(), models: [], error: 'GROQ_API_KEY is not set on the server', running: null };
+    state.groq = {
+      at: Date.now(),
+      models: GROQ_MODELS.map((model) => build(model, false, null, 'GROQ_API_KEY is not set on the server')),
+      error: 'GROQ_API_KEY is not set on the server',
+      running: null,
+    };
     console.warn('[models] GROQ_API_KEY missing - cannot test Groq models');
     return state.groq;
   }
 
-  let catalog;
-  try {
-    catalog = await listGroqModelIds(apiKey);
-  } catch (err) {
-    state.groq = { at: Date.now(), models: [], error: err.message, running: null };
-    console.warn(`[models] Groq model list failed: ${err.message}`);
-    return state.groq;
-  }
+  console.log(`[models] testing ${GROQ_MODELS.length} allowed Groq models live...`);
+  const results = await mapLimit(GROQ_MODELS, GROQ_TEST_CONCURRENCY, async (model) => {
+    const bare = model.apiId.replace(/^openai\//, '');
+    const candidates = [model.apiId, bare].filter((value, index, list) => list.indexOf(value) === index);
 
-  console.log(`[models] testing ${catalog.length} Groq models live...`);
-  const results = await mapLimit(catalog, TEST_CONCURRENCY, async (model) => {
-    const probe = await probeChat({
-      url: `${GROQ_BASE}/chat/completions`,
-      apiId: model.id,
-      headers: { Authorization: `Bearer ${apiKey}` },
-      label: 'Groq',
-    });
-    return entry({
-      provider: 'groq',
-      apiId: model.id,
-      tier: tierFor(model.id),
-      working: probe.working,
-      latency: probe.latency,
-      error: probe.error,
-    });
+    let lastError = 'model does not exist on Groq';
+    for (const apiId of candidates) {
+      const probe = await probeChat({
+        url: `${GROQ_BASE}/chat/completions`,
+        apiId,
+        headers: { Authorization: `Bearer ${apiKey}` },
+        label: 'Groq',
+      });
+      if (probe.working) {
+        console.log(`[models] Groq ${model.apiId} replied as "${apiId}" in ${probe.latency}ms`);
+        return build(model, true, probe.latency, null);
+      }
+      lastError = probe.error || lastError;
+      const missing = /does not exist|not found|decommissioned|invalid/i.test(lastError);
+      if (!missing) break;
+    }
+
+    console.warn(`[models] Groq ${model.apiId} failed: ${lastError}`);
+    return build(model, false, null, lastError);
   });
 
   const working = results.filter((model) => model.working).length;
-  console.log(`[models] Groq: ${working}/${results.length} models replied (${startedAt})`);
+  console.log(`[models] Groq: ${working}/${results.length} allowed models replied`);
   state.groq = { at: Date.now(), models: results, error: null, running: null };
   return state.groq;
 }
 
-async function listOpenRouterFreeModels() {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), LIST_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${OPENROUTER_BASE}/models`, {
-      headers: { Accept: 'application/json' },
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    let payload = null;
-    try {
-      payload = text ? JSON.parse(text) : null;
-    } catch {
-      payload = null;
-    }
-    if (!response.ok) throw new Error(`OpenRouter models returned ${response.status}`);
-    const list = Array.isArray(payload?.data) ? payload.data : [];
-    return list
-      .filter((model) => model && typeof model.id === 'string' && model.id.endsWith(':free'))
-      .map((model) => ({ id: model.id, name: model.name || model.id }));
-  } finally {
-    clearTimeout(timer);
+/** Full OpenRouter catalog (all models, free and paid). */
+export async function getOpenRouterCatalog({ refresh = false } = {}) {
+  const cached = state.openrouterCatalog;
+  if (!refresh && cached.models && Date.now() - cached.at < CACHE_MS) {
+    return { ok: true, models: cached.models, cached: true };
   }
+  if (cached.running) return cached.running;
+
+  cached.running = (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), LIST_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${OPENROUTER_BASE}/models`, {
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`OpenRouter models returned ${response.status}`);
+      const payload = await readJSON(response);
+      const list = Array.isArray(payload?.data) ? payload.data : [];
+      const models = list
+        .filter((model) => model && typeof model.id === 'string')
+        .map((model) => ({
+          id: model.id,
+          name: model.name || model.id,
+          free: model.id.endsWith(':free'),
+          context: model.context_length ?? null,
+          promptPrice: model.pricing?.prompt ?? null,
+          completionPrice: model.pricing?.completion ?? null,
+        }))
+        .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+
+      state.openrouterCatalog = { at: Date.now(), models, running: null };
+      console.log(`[models] OpenRouter catalog loaded: ${models.length} models`);
+      return { ok: true, models, cached: false };
+    } catch (err) {
+      state.openrouterCatalog = { at: 0, models: [], running: null };
+      console.warn(`[models] OpenRouter catalog failed: ${err.message}`);
+      return { ok: false, models: [], error: err.message };
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+
+  const result = await state.openrouterCatalog.running;
+  return result;
 }
 
+/** Probe a sample of the OpenRouter catalog so the UI can show what replies. */
 async function runOpenRouterTests() {
   const apiKey = String(process.env.OPENROUTER_API_KEY || '').trim();
   if (!apiKey) {
@@ -215,22 +243,21 @@ async function runOpenRouterTests() {
       error: 'OPENROUTER_API_KEY is not set on the server',
       running: null,
     };
-    console.log('[models] OPENROUTER_API_KEY missing - skipping OpenRouter free model tests');
+    console.log('[models] OPENROUTER_API_KEY missing - skipping OpenRouter model tests');
     return state.openrouter;
   }
 
-  let catalog;
-  try {
-    catalog = await listOpenRouterFreeModels();
-  } catch (err) {
-    state.openrouter = { at: Date.now(), models: [], error: err.message, running: null };
-    console.warn(`[models] OpenRouter model list failed: ${err.message}`);
+  const catalog = await getOpenRouterCatalog();
+  if (!catalog.ok) {
+    state.openrouter = { at: Date.now(), models: [], error: catalog.error, running: null };
     return state.openrouter;
   }
 
-  const sample = catalog.slice(0, OPENROUTER_TEST_LIMIT);
-  console.log(`[models] testing ${sample.length}/${catalog.length} OpenRouter :free models live...`);
-  const results = await mapLimit(sample, TEST_CONCURRENCY, async (model) => {
+  const free = catalog.models.filter((model) => model.free);
+  const sample = free.slice(0, OPENROUTER_TEST_LIMIT);
+  console.log(`[models] testing ${sample.length}/${catalog.models.length} OpenRouter models live...`);
+
+  const results = await mapLimit(sample, 6, async (model) => {
     const probe = await probeChat({
       url: `${OPENROUTER_BASE}/chat/completions`,
       apiId: model.id,
@@ -243,8 +270,9 @@ async function runOpenRouterTests() {
     });
     return entry({
       provider: 'openrouter',
+      id: `openrouter/${model.id}`,
       apiId: model.id,
-      displayName: String(model.name || '').replace(/\s*\(free\)\s*$/i, ''),
+      displayName: String(model.name || model.id).replace(/\s*\(free\)\s*$/i, ''),
       tier: 'FREE',
       working: probe.working,
       latency: probe.latency,
@@ -253,7 +281,7 @@ async function runOpenRouterTests() {
   });
 
   const working = results.filter((model) => model.working).length;
-  console.log(`[models] OpenRouter: ${working}/${results.length} free models replied`);
+  console.log(`[models] OpenRouter: ${working}/${results.length} tested free models replied`);
   state.openrouter = { at: Date.now(), models: results, error: null, running: null };
   return state.openrouter;
 }
@@ -292,13 +320,6 @@ function legacyShape(model) {
   };
 }
 
-/**
- * Groups: FREE & working, PAID & working, not working (shown disabled).
- * Only models that were actually probed in the last test appear here.
- *
- * Without `wait` this never blocks: while the first run is in flight it returns
- * `testing: true` so the UI can show a loading state instead of a fake list.
- */
 export async function getModelReport({ refresh = false, wait = false } = {}) {
   if (wait) {
     await Promise.all([ensureGroq({ refresh }), ensureOpenRouter({ refresh })]);
@@ -329,8 +350,9 @@ export async function getModelReport({ refresh = false, wait = false } = {}) {
     testedAt,
     cachedForMinutes: Math.round(CACHE_MS / 60000),
     errors: [groq.error, openrouter.error].filter(Boolean),
+    // The only Groq models the app ever offers.
+    groqAllowed: GROQ_MODELS.map((model) => ({ id: model.id, label: model.label, apiId: model.apiId })),
     groups: { freeWorking, paidWorking, notWorking },
-    // Backwards-compatible lists used by the dashboard counts and playground.
     free: freeWorking.map(legacyShape),
     paid: paidWorking.map(legacyShape),
     counts: {
