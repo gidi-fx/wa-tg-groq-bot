@@ -1,22 +1,25 @@
 {
-  "name": "wa-tg-groq-bot",
+  "name": "whatsapp-groq-router-v2",
   "version": "2.0.0",
-  "description": "WhatsApp (Evolution API, per-instance) + Telegram MTProto multi-user phone login with Groq AI agents for text and voice",
+  "private": true,
+  "description": "WhatsApp Groq Router v2 - multi-agent WhatsApp router with Supabase, Evolution API v2, Groq and OpenRouter (BYOK). Telegram MTProto Coming Soon (Disabled).",
   "type": "module",
-  "main": "server.js",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "check": "node --check src/index.js && node --check src/supabase.js && node --check src/memory.js && node --check src/ai.js && node --check src/models.js && node --check src/evolution.js && node --check src/agents/store.js"
   },
   "engines": {
     "node": ">=18"
   },
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.21.1",
-    "cors": "^2.8.6",
-    "dotenv": "^18.0.10",
-    "express": "^4.22.3",
-    "groq-sdk": "^1.6.0",
-    "telegram": "^2.26.22"
+    "@supabase/supabase-js": "^2.45.4",
+    "axios": "^1.7.9",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "multer": "^2.0.1"
   }
 }
