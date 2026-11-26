@@ -13,6 +13,30 @@
 
     const TELEGRAM = 'Telegram MTProto Coming Soon (Disabled)';
     const SUPABASE_WARNING = '⚠️ Supabase not connected - optional - agents, inbox, groups, media will NOT be saved permanently. Add SUPABASE_URL + SUPABASE_KEY in .env to enable persistence. Get free at supabase.com';
+    const API_TIMEOUT_MS = 45000; // Render free tier cold starts can take ~40s
+
+    /** True only when the backend confirmed Supabase is configured. Never assume it is. */
+    function supabaseReady(config) {
+      return Boolean(config && config.supabase && config.supabase.configured === true);
+    }
+
+    /** Config shape used when the backend is unreachable or returns nothing (mock/memory mode). */
+    function fallbackConfig() {
+      return {
+        ok: true,
+        app: 'WhatsApp Groq Router v2',
+        offline: true,
+        telegram: TELEGRAM,
+        telegramDisabled: true,
+        supabase: { configured: false, optional: true, bucket: 'unused', warning: SUPABASE_WARNING },
+        persistence: 'memory',
+        evolution: { configured: false, url: null },
+        ai: { groq: false, openrouter: false, tts: 'unavailable' },
+        realtime: { url: null, anonKey: null },
+        counts: { agents: 0, chats: 0, groups: 0, messages: 0 },
+        modelsSource: 'fallback',
+      };
+    }
     const titles = {
       '/': ['Dashboard', 'Overview of your WhatsApp AI router'],
       '/connect': ['Connect WhatsApp', 'Link an Evolution API instance by QR or phone number'],
@@ -42,6 +66,21 @@
     const cardCls = 'rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900/60';
     const inputCls = 'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/25 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100';
     const labelCls = 'mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400';
+
+    /** Fill in any missing config fields so pages never read undefined. */
+    function normalizeConfig(raw) {
+      const base = fallbackConfig();
+      const config = raw && typeof raw === 'object' ? raw : {};
+      return {
+        ...base,
+        ...config,
+        supabase: { ...base.supabase, ...(config.supabase || {}) },
+        evolution: { ...base.evolution, ...(config.evolution || {}) },
+        ai: { ...base.ai, ...(config.ai || {}) },
+        realtime: { ...base.realtime, ...(config.realtime || {}) },
+        counts: { ...base.counts, ...(config.counts || {}) },
+      };
+    }
 
     /* ============================== utils ================================= */
     const $ = (sel, root = document) => root.querySelector(sel);
@@ -75,7 +114,27 @@
         init.headers['Content-Type'] = 'application/json';
         init.body = JSON.stringify(options.body);
       }
-      const response = await fetch(path, init);
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), options.timeoutMs || API_TIMEOUT_MS);
+      let response;
+      try {
+        response = await fetch(path, { ...init, signal: controller.signal });
+      } catch (cause) {
+        console.error('[api] network error for ' + path, cause);
+        const error = new Error(
+          cause && cause.name === 'AbortError'
+            ? 'Request timed out for ' + path + '. The backend may still be waking up.'
+            : 'Cannot reach the backend for ' + path + '. It may be waking up.',
+        );
+        error.code = 'network_error';
+        error.offline = true;
+        error.path = path;
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+
       const text = await response.text();
       let data = {};
       try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text }; }
@@ -107,6 +166,18 @@
       return '<div class="flex items-center justify-center gap-3 py-16 text-sm text-slate-500 dark:text-slate-400"><div class="spinner"></div>' + esc(label) + '…</div>';
     }
 
+    function offlinePanel(error) {
+      const detail = error && error.message ? error.message : 'The backend did not respond.';
+      return '<div class="mx-auto max-w-lg ' + cardCls + ' p-8 text-center">'
+        + '<div class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-amber-500/15 text-2xl">⏳</div>'
+        + '<h2 class="mt-4 text-lg font-bold">Backend waking up on Render free tier</h2>'
+        + '<p class="mt-2 text-sm text-slate-600 dark:text-slate-300">Wait 40s then refresh. Free instances sleep when idle and take a while to boot.</p>'
+        + '<p class="mt-3 break-words text-xs text-slate-500 dark:text-slate-400">' + esc(detail) + '</p>'
+        + '<button onclick="location.reload()" class="' + btnPrimary + ' mt-5">Retry</button>'
+        + '<p class="mt-4 text-[11px] text-slate-500 dark:text-slate-400">No Supabase? That is optional - the app runs on temporary in-memory data.</p>'
+        + '</div>';
+    }
+
     function errorBox(error, retry = true) {
       return '<div class="' + cardCls + ' p-6"><div class="flex items-start gap-3"><span class="text-xl">⚠️</span><div class="min-w-0"><p class="font-semibold text-rose-600 dark:text-rose-400">Something went wrong</p><p class="mt-1 break-words text-sm text-slate-600 dark:text-slate-300">' + esc(error.message || String(error)) + '</p>' + (retry ? '<button id="retry-btn" class="' + btnGhost + ' mt-4">Retry</button>' : '') + '</div></div></div>';
     }
@@ -129,7 +200,7 @@
     function paintPersistenceBanner() {
       const banner = $('#persistence-banner');
       if (!banner) return;
-      if (state.config && state.config.supabase && state.config.supabase.configured === false) {
+      if (state.config && !supabaseReady(state.config)) {
         banner.innerHTML = '<span>⚠️ Supabase not connected - <b>optional</b> - agents, inbox, groups, media will <b>NOT</b> be saved permanently. Add <code class="rounded bg-amber-500/20 px-1">SUPABASE_URL</code> + <code class="rounded bg-amber-500/20 px-1">SUPABASE_KEY</code> in <code class="rounded bg-amber-500/20 px-1">.env</code> to enable persistence. Get free at <a href="https://supabase.com" target="_blank" rel="noopener" class="underline">supabase.com</a></span>';
         banner.classList.remove('hidden');
       } else {
@@ -260,25 +331,41 @@
 
     /* ============================== pages ================================= */
     async function getConfig(force = false) {
-      if (!state.config || force) state.config = await api('/api/config');
+      if (!state.config || force) state.config = normalizeConfig(await api('/api/config'));
       return state.config;
     }
 
+    // Loaders fall back to whatever is already in memory so a failing endpoint
+    // never blanks a page. Network failures are logged and swallowed.
     async function loadAgents() {
-      const data = await api('/api/agents');
-      state.agents = data.agents || [];
+      try {
+        const data = await api('/api/agents');
+        state.agents = data.agents || [];
+      } catch (error) {
+        console.error('[agents] /api/agents failed, keeping in-memory list', error);
+        state.agents = state.agents || [];
+      }
       return state.agents;
     }
 
     async function loadCatalog(force = false) {
       if (!force && state.catalog.free.length) return state.catalog;
-      const data = await api('/api/models' + (force ? '?refresh=1' : ''));
-      state.catalog = { free: data.free || [], paid: data.paid || [], source: data.source || 'unknown' };
+      try {
+        const data = await api('/api/models' + (force ? '?refresh=1' : ''));
+        state.catalog = { free: data.free || [], paid: data.paid || [], source: data.source || 'unknown' };
+      } catch (error) {
+        console.error('[models] /api/models failed, keeping fallback catalog', error);
+      }
       return state.catalog;
     }
 
     async function loadInstances() {
-      const data = await api('/api/instances');
-      state.instances = data.instances || [];
-      return data;
+      try {
+        const data = await api('/api/instances');
+        state.instances = data.instances || [];
+        return data;
+      } catch (error) {
+        console.error('[instances] /api/instances failed, using empty list', error);
+        return { ok: true, configured: false, instances: state.instances || [], error: error.message };
+      }
     }
