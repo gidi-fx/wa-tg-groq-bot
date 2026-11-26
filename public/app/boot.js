@@ -10,7 +10,6 @@
         '/groups': typeof groupsPage === 'function' ? groupsPage : null,
         '/playground': typeof playgroundPage === 'function' ? playgroundPage : null,
         '/settings': typeof settingsPage === 'function' ? settingsPage : null,
-        '/telegram': typeof telegramPage === 'function' ? telegramPage : null,
       };
       if (map[path]) return map[path];
       if (typeof notFoundPage === 'function') return notFoundPage;
