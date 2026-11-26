@@ -238,6 +238,22 @@ export async function sendPresence(instance, number, presence = 'composing') {
   }
 }
 
+/** Mark received messages as read (blue ticks) for a chat. */
+export async function markAsRead(instance, number, key) {
+  if (!key?.id) return null;
+  try {
+    return await call(
+      'POST',
+      `/chat/markMessageAsRead/${instancePath(instance)}`,
+      { readMessages: [{ remoteJid: String(number), fromMe: false, id: String(key.id) }] },
+      10000,
+    );
+  } catch (err) {
+    console.warn(`[evolution] markAsRead failed for ${number}: ${err.message}`);
+    return null;
+  }
+}
+
 export async function sendAudio(instance, number, audio, { mimetype, quoted } = {}) {
   const buffer = Buffer.isBuffer(audio) ? audio : Buffer.from(audio || '');
   if (!buffer.length) throw new AppError('Audio buffer is empty', 400, 'empty_audio');
@@ -311,4 +327,18 @@ export async function getMediaBase64(instance, key, message) {
   const base64 = raw.startsWith('data:') ? raw.slice(raw.indexOf(',') + 1) : raw;
   const buffer = Buffer.from(base64, 'base64');
   return buffer.length ? buffer : null;
+}
+
+/** Delete an Evolution instance (removes it from Evolution). */
+export async function deleteInstance(instance) {
+  const name = String(instance || '').trim();
+  if (!name) throw new AppError('Instance name is required', 400, 'invalid_instance');
+  await call('DELETE', `/instance/delete/${instancePath(name)}`, undefined, 30000);
+}
+
+/** Reconnect an Evolution instance (re-establishes the connection). */
+export async function reconnectInstance(instance) {
+  const name = String(instance || '').trim();
+  if (!name) throw new AppError('Instance name is required', 400, 'invalid_instance');
+  await call('POST', `/instance/reconnect/${instancePath(name)}`, undefined, 60000);
 }

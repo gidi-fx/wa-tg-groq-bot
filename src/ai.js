@@ -303,7 +303,7 @@ export async function transcribeAudio(buffer, fileName = 'audio.ogg', mimetype =
  * Text -> speech. ElevenLabs is used when configured, otherwise Groq TTS.
  * Returns { buffer, mimetype, provider }.
  */
-export async function synthesizeSpeech(text) {
+export async function synthesizeSpeech(text, { voice } = {}) {
   const input = String(text || '')
     .replace(/\[\[SEND_MEDIA:[^\]]+\]\]/gi, '')
     .replace(/[*_~`#>]/g, ' ')
@@ -336,6 +336,8 @@ export async function synthesizeSpeech(text) {
   if (!key) throw new AppError('GROQ_API_KEY is not configured on the server (voice replies)', 503, 'missing_groq_key');
 
   // Groq TTS = Canopy Labs Orpheus (playai-tts was retired 2025-12-31).
+  // The agent's chosen voice wins over the server default.
+  const ttsVoice = String(voice || TTS_VOICE);
   const formats = [TTS_FORMAT, 'wav'].filter((value, index, list) => value && list.indexOf(value) === index);
   let lastError = null;
 
@@ -345,7 +347,7 @@ export async function synthesizeSpeech(text) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
       body: JSON.stringify({
         model: TTS_MODEL,
-        voice: TTS_VOICE,
+        voice: ttsVoice,
         input: input.slice(0, 3500),
         response_format: format,
       }),
@@ -363,7 +365,7 @@ export async function synthesizeSpeech(text) {
       lastError = new AppError('Groq TTS returned empty audio', 502, 'tts_failed');
       continue;
     }
-    return { buffer, mimetype: TTS_MIME[format] || 'audio/wav', provider: 'groq', model: TTS_MODEL, voice: TTS_VOICE };
+    return { buffer, mimetype: TTS_MIME[format] || 'audio/wav', provider: 'groq', model: TTS_MODEL, voice: ttsVoice };
   }
 
   throw lastError || new AppError('Groq TTS failed', 502, 'tts_failed');

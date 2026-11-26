@@ -409,6 +409,8 @@ app.post(
       name: body.name,
       instruction: body.instruction,
       voiceEnabled: body.voiceEnabled,
+      voiceId: body.voiceId,
+      replyMode: body.replyMode,
       mediaEnabled: body.mediaEnabled,
       model: validateModel(body.model),
       mediaFiles: body.mediaFiles,
@@ -427,6 +429,8 @@ app.put(
       'name',
       'instruction',
       'voiceEnabled',
+      'voiceId',
+      'replyMode',
       'mediaEnabled',
       'mediaFiles',
       'connectedInstance',
@@ -567,6 +571,28 @@ app.get(
   }),
 );
 
+app.delete(
+  '/api/instance/delete/:instance',
+  asyncRoute(async (req, res) => {
+    const instance = String(req.params.instance || '').trim();
+    if (!instance) throw new AppError('instance is required', 400, 'missing_instance');
+    await evo.deleteInstance(instance);
+    console.log(`[instance] deleted ${instance}`);
+    res.json({ ok: true, instance });
+  }),
+)
+
+app.post(
+  '/api/instance/reconnect/:instance',
+  asyncRoute(async (req, res) => {
+    const instance = String(req.params.instance || '').trim();
+    if (!instance) throw new AppError('instance is required', 400, 'missing_instance');
+    await evo.reconnectInstance(instance);
+    console.log(`[instance] reconnecting ${instance}`);
+    res.json({ ok: true, instance });
+  }),
+)
+
 /* -------------------------------- webhook --------------------------------- */
 
 app.post(
@@ -686,6 +712,9 @@ async function handleWebhook(instance, payload) {
     }
   }
 
+  // A voice note must be answered with a voice note when the agent mirrors the user.
+  const isIncomingAudio = Boolean(media && media.kind === 'audio') || messageType === 'audioMessage';
+
   if (!content) {
     if (media) content = `[${media.kind}]`;
     else {
@@ -713,7 +742,22 @@ async function handleWebhook(instance, payload) {
 
   const target = remoteJid;
   const quoted = { key, message: rawMessage };
-  await evo.sendPresence(sendInstance, target, 'composing');
+
+  const replyMode = agent.replyMode || (agent.voiceEnabled ? 'voiceOnly' : 'textOnly');
+  const voiceWillBeSent =
+    replyMode === 'voiceOnly'
+    || replyMode === 'both'
+    || (replyMode === 'mirror' && isIncomingAudio);
+  const presenceKind = voiceWillBeSent ? 'recording' : 'composing';
+
+  // Read receipt first, then show the indicator immediately (before the model
+  // call) and keep refreshing it so it never times out while we generate.
+  await evo.markAsRead(sendInstance, target, key).catch(() => null);
+  const pingPresence = () => {
+    evo.sendPresence(sendInstance, target, presenceKind).catch(() => null);
+  };
+  const presenceInterval = setInterval(pingPresence, 8000);
+  pingPresence();
 
   try {
     const history = await getHistory(remoteJid, 20).catch(() => []);
@@ -724,7 +768,20 @@ async function handleWebhook(instance, payload) {
       messages: buildMessages({ agent, history, userText: content }),
     });
 
-    const { text: replyText, media: requestedMedia } = extractMediaRequest(result.text, agent.mediaFiles);
+    let replyText = extractMediaRequest(result.text, agent.mediaFiles).text;
+    // Voice notes are synthesised, so keep the text short for faster TTS.
+    if (voiceWillBeSent) {
+      replyText = replyText.slice(0, 500);
+    }
+
+    const wantsVoice =
+      replyMode === 'voiceOnly'
+      || replyMode === 'both'
+      || (replyMode === 'mirror' && isIncomingAudio);
+    const wantsText =
+      replyMode === 'textOnly'
+      || replyMode === 'both'
+      || (replyMode === 'mirror' && !isIncomingAudio);
 
     if (requestedMedia && agent.mediaEnabled) {
       const file = await agentMediaBuffer(requestedMedia);
@@ -737,19 +794,41 @@ async function handleWebhook(instance, payload) {
         quoted,
       });
       console.log(`[webhook] replied to ${remoteJid} with media ${requestedMedia.name}`);
-    } else if (agent.voiceEnabled) {
+    }
+
+    // Apply reply mode: textOnly, voiceOnly, both, or mirror
+    if (wantsText && wantsVoice) {
+      // Both text and voice
+      const ttsStart = Date.now();
       try {
-        const speech = await synthesizeSpeech(replyText);
+        const speech = await synthesizeSpeech(replyText, { voice: agent.voiceId });
+        const ttsDuration = Date.now() - ttsStart;
         await evo.sendAudio(sendInstance, target, speech.buffer, {
           mimetype: speech.mimetype,
           quoted,
         });
-        console.log(`[webhook] replied to ${remoteJid} with voice (${speech.provider})`);
+        const sendDuration = Date.now() - ttsStart - ttsDuration;
+        await evo.sendText(sendInstance, target, replyText, { quoted });
+        console.log(`[webhook] replied to ${remoteJid} with both text+voice Groq=${result.usage?.totalTokens || '?'} tokens TTS=${ttsDuration}ms Send=${sendDuration}ms`);
+      } catch (err) {
+        console.warn(`[webhook] TTS failed - sending text only: ${err.message}`);
+        await evo.sendText(sendInstance, target, replyText, { quoted });
+      }
+    } else if (wantsVoice) {
+      // Voice only
+      try {
+        const speech = await synthesizeSpeech(replyText, { voice: agent.voiceId });
+        await evo.sendAudio(sendInstance, target, speech.buffer, {
+          mimetype: speech.mimetype,
+          quoted,
+        });
+        console.log(`[webhook] replied to ${remoteJid} with voice only Groq=${result.usage?.totalTokens || '?'} tokens`);
       } catch (err) {
         console.warn(`[webhook] TTS failed - sending text instead: ${err.message}`);
         await evo.sendText(sendInstance, target, replyText, { quoted });
       }
-    } else {
+    } else if (wantsText) {
+      // Text only
       await evo.sendText(sendInstance, target, replyText, { quoted });
     }
 
@@ -773,6 +852,7 @@ async function handleWebhook(instance, payload) {
       .sendText(sendInstance, target, `⚠️ AI error: ${err.message}`.slice(0, 500), { quoted })
       .catch(() => null);
   } finally {
+    clearInterval(presenceInterval);
     await evo.sendPresence(sendInstance, target, 'paused').catch(() => null);
   }
 }
