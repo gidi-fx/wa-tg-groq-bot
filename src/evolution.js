@@ -24,6 +24,21 @@ function instancePath(instance) {
   return encodeURIComponent(String(instance || '').trim());
 }
 
+/** Evolution instance name for a phone number: wa-<digits>. The user never types this. */
+export function instanceNameForNumber(number) {
+  const digitsOnly = String(number || '').replace(/\D/g, '');
+  if (digitsOnly.length < 8) {
+    throw new AppError('A WhatsApp number with country code is required', 400, 'invalid_number');
+  }
+  return `wa-${digitsOnly}`;
+}
+
+/** Phone number encoded in an instance name, or null for custom names. */
+export function instanceNumber(instance) {
+  const match = /^wa-(\d+)$/.exec(String(instance || '').trim());
+  return match ? match[1] : null;
+}
+
 function headers() {
   return { apikey: EVOLUTION_API_KEY, 'Content-Type': 'application/json' };
 }
@@ -118,17 +133,48 @@ export async function setWebhook(instance, url) {
   }
 }
 
+/** Create the instance when it does not exist yet, then reuse it. */
+export async function ensureInstance(instanceName, webhookUrl) {
+  const name = String(instanceName || '').trim();
+  if (!name) throw new AppError('Instance name is required', 400, 'invalid_instance');
+  const existing = await fetchInstances().catch(() => []);
+  if (existing.some((item) => item.name === name)) return { instance: name, created: false };
+  const created = await createInstance(name, webhookUrl);
+  return { instance: name, created: true, webhook: created.webhook };
+}
+
 export async function connectInstance(instance, number) {
-  const query = number ? `?number=${encodeURIComponent(String(number).replace(/\D/g, ''))}` : '';
+  const digitsOnly = number ? String(number).replace(/\D/g, '') : '';
+  const query = digitsOnly ? `?number=${encodeURIComponent(digitsOnly)}` : '';
+  console.log(`[evolution] GET /instance/connect/${instance}${query}`);
   const data = await call('GET', `/instance/connect/${instancePath(instance)}${query}`, undefined, 30000);
+  console.log('[evolution] connect response:', JSON.stringify(data)?.slice(0, 4000));
+
   const qr = data?.qrcode && typeof data.qrcode === 'object' ? data.qrcode : {};
+  const inner = data?.data && typeof data.data === 'object' ? data.data : {};
+  const rawCode = data?.pairingCode
+    || inner.pairingCode
+    || data?.code
+    || inner.code
+    || qr.pairingCode
+    || qr.code
+    || data?.instance?.pairingCode
+    || null;
+  const rawBase64 = data?.base64
+    || inner.base64
+    || qr.base64
+    || inner.qrcode?.base64
+    || data?.instance?.qrcode?.base64
+    || null;
+  const codeDigits = rawCode ? String(rawCode).replace(/\D/g, '') : '';
+
   return {
     instance,
-    state: data?.state || data?.instance?.state || null,
-    base64: qr.base64 || data?.base64 || null,
-    pairingCode: qr.pairingCode || data?.pairingCode || null,
-    code: qr.code || data?.code || null,
-    count: qr.count ?? data?.count ?? null,
+    number: digitsOnly || instanceNumber(instance),
+    state: data?.state || inner.state || data?.instance?.state || null,
+    base64: rawBase64,
+    pairingCode: codeDigits.length === 8 ? codeDigits : null,
+    count: qr.count ?? data?.count ?? inner.count ?? null,
   };
 }
 
@@ -205,7 +251,8 @@ export async function fetchGroups(instance) {
     undefined,
     45000,
   );
-  const list = Array.isArray(data) ? data : Array.isArray(data?.groups) ? data.groups : [];
+  const candidates = [data, data?.data, data?.groups, data?.data?.groups, data?.result];
+  const list = candidates.find((item) => Array.isArray(item)) || [];
   return list
     .map((group) => ({
       jid: group.id || group.jid || group.remoteJid,
