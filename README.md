@@ -113,7 +113,7 @@ Free Groq models are the default. Re-testing is live: `/api/models` only lists m
 | GET | `/health`, `/api/config`, `/api/models` |
 | GET | `/api/openrouter/models` |
 | POST | `/api/transcribe` (multipart `file`, or JSON `audioBase64` / `audioUrl`) |
-| GET | `/api/instance/qr/:instance` (latest QR / pairing code pushed by webhook) |
+| GET | `/api/instance/qr/:instance` (latest QR from the webhook; never a pairing code) |
 | GET/POST | `/api/agents` |
 | GET/PUT/DELETE | `/api/agents/:id` |
 | POST/DELETE | `/api/agents/:id/media` |
@@ -138,7 +138,7 @@ Voice overrides: `GROQ_TRANSCRIBE_MODEL` (default `whisper-large-v3`), `GROQ_TRA
 
 ## Pairing code (Evolution)
 
-Evolution only issues a real pairing code when `POST /instance/connect/<instance>` is called with `{ "number": "234..." }` — the old `GET` returns a QR alone and `pairingCode` stays `null`. This app now posts to that endpoint (falling back to `GET` for older builds) and also handles the `qrcode.updated` webhook, which is where Evolution usually pushes the code. The Connect page shows a **Try Pairing Code Again** button and polls `/api/instance/qr/:instance` for a code for ~36 seconds after each request.
+Evolution v2.3.8 exposes pairing only on `GET /instance/connect/<instance>?number=<digits>` (country code, no `+`); the `POST` variant returns 404. The app therefore makes exactly one GET per button press and reads `pairingCode` from the response, falling back to `base64` (QR) only when no code is present. Pairing codes can contain letters (e.g. `6DAQQ8N2`), so they are passed through verbatim. The `code` field is the raw QR string and is never treated as a pairing code, and the `qrcode.updated` webhook is not used for pairing codes at all. A second connect call invalidates the first code, so the Connect page disables its buttons while a request is in flight and for 60 seconds afterwards, with no automatic retries.
 
 ## Security notes
 
