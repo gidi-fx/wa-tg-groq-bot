@@ -80,9 +80,17 @@
           + '<div class="mt-3 flex flex-wrap items-center justify-between gap-2"><p id="model-meta" class="text-[11px] text-slate-500 dark:text-slate-400"></p><button type="button" id="retest-models" class="' + btnGhost + ' !py-1 !text-[11px]">Re-test models live</button></div>'
           + '</div>'
           + '<div class="grid gap-3 sm:grid-cols-2">'
-          + '<label class="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-800"><span><span class="block text-sm font-semibold">Reply as Voice Note (uses Groq TTS)</span><span class="text-xs text-slate-500 dark:text-slate-400">Text → speech via Groq, sent with sendWhatsAppAudio</span></span><input type="checkbox" class="toggle" id="agent-voice"' + (agent?.voiceEnabled ? ' checked' : '') + ' /></label>'
+          + '<label class="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-800"><span><span class="block text-sm font-semibold">Voice notes (Groq TTS)</span><span class="text-xs text-slate-500 dark:text-slate-400">Text → speech, sent with sendWhatsAppAudio</span></span><input type="checkbox" class="toggle" id="agent-voice"' + (agent?.voiceEnabled ? ' checked' : '') + ' /></label>'
           + '<label class="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-800"><span><span class="block text-sm font-semibold">Media files</span><span class="text-xs text-slate-500 dark:text-slate-400">Send real uploads</span></span><input type="checkbox" class="toggle" id="agent-media"' + (agent?.mediaEnabled ? ' checked' : '') + ' /></label>'
           + '</div>'
+          + '<div class="rounded-xl border border-slate-200 p-3 dark:border-slate-800"><label class="' + labelCls + '" for="agent-voice-id">Voice</label>'
+          + '<div class="flex flex-col gap-2 sm:flex-row sm:items-center"><select id="agent-voice-id" class="' + inputCls + ' !py-1.5 !text-xs">' + VOICES.map((v) => '<option value="' + v.id + '"' + ((agent?.voiceId || 'troy') === v.id ? ' selected' : '') + '>' + v.label + '</option>').join('') + '</select>'
+          + '<button type="button" id="preview-voice" class="' + btnGhost + ' whitespace-nowrap !py-1.5 !text-xs">▶ Play preview</button></div></div>'
+          + '<div class="rounded-xl border border-slate-200 p-3 dark:border-slate-800"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Reply mode</p>'
+          + '<div class="mt-2 flex flex-wrap gap-2">'
+          + [['textOnly', 'Text only'], ['voiceOnly', 'Voice only'], ['both', 'Text + voice'], ['mirror', 'Mirror: voice for voice notes']].map(([value, label]) =>
+            '<label class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold dark:border-slate-800"><input type="radio" name="agent-reply-mode" value="' + value + '" class="accent-emerald-500"' + (((agent?.replyMode || 'textOnly') === value) ? ' checked' : '') + ' />' + label + '</label>').join('')
+          + '</div></div>'
           + '<div id="media-section" class="' + (agent?.mediaEnabled ? '' : 'hidden') + ' rounded-xl border border-slate-200 p-4 dark:border-slate-800"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Media (images, docs, audio · max 20 MB each)</p><div id="media-list" class="mt-3 space-y-2"></div><input id="agent-files" type="file" multiple class="mt-3 block w-full text-xs text-slate-500 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-500 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-slate-950 dark:text-slate-400" /></div>'
           + '<div class="flex flex-wrap justify-end gap-2 border-t border-slate-200 pt-4 dark:border-slate-800"><button type="button" data-cancel class="' + btnGhost + '">Cancel</button><button type="submit" id="save-agent" class="' + btnPrimary + '"' + (accounts.length ? '' : ' disabled') + '>' + (editing ? 'Save changes' : 'Create agent') + '</button></div>'
           + '</form>';
@@ -97,6 +105,20 @@
         const orPanel = $('#openrouter-panel', form);
         const stateEl = $('#model-test-state', form);
         const metaEl = $('#model-meta', form);
+
+        // Orpheus voices exposed by Groq TTS (env GROQ_TTS_VOICE overrides the default).
+        const VOICES = [
+          { id: 'troy', label: 'Troy · English (US) · male, warm' },
+          { id: 'hannah', label: 'Hannah · English (US) · female, calm' },
+          { id: 'diana', label: 'Diana · English (US) · female, bright' },
+          { id: 'austin', label: 'Austin · English (US) · male, deep' },
+          { id: 'daniel', label: 'Daniel · English (US) · male, neutral' },
+          { id: 'autumn', label: 'Autumn · English (US) · female, soft' },
+          { id: 'leah', label: 'Leah · English (US) · female, lively' },
+          { id: 'lucas', label: 'Lucas · English (US) · male, young' },
+          { id: 'michael', label: 'Michael · English (US) · male, steady' },
+          { id: 'david', label: 'David · English (US) · male, mature' },
+        ];
 
         // Groq is locked to exactly these 2 models - nothing else is offered.
         const GROQ_OPTIONS = [
@@ -306,6 +328,14 @@
           mediaSection.classList.toggle('hidden', !event.target.checked);
         });
 
+        $('#preview-voice', form).addEventListener('click', () => {
+          const voice = $('#agent-voice-id', form)?.value || 'troy';
+          if (!('speechSynthesis' in window)) return toast('This browser cannot play a preview', 'info');
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance('Hi! This is the ' + voice + ' voice from your WhatsApp assistant.');
+          window.speechSynthesis.speak(utterance);
+        });
+
         $('[data-cancel]', form).addEventListener('click', () => {
           clearTimeout(pollTimer);
           modal.close();
@@ -324,6 +354,8 @@
             instruction: $('#agent-instruction', form).value,
             model: selectedModel,
             voiceEnabled: $('#agent-voice', form).checked,
+            voiceId: $('#agent-voice-id', form)?.value || null,
+            replyMode: ($('input[name="agent-reply-mode"]:checked', form) || {}).value || 'textOnly',
             mediaEnabled: $('#agent-media', form).checked,
             connectedInstance,
           };
