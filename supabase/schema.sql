@@ -130,5 +130,5 @@ exception
 end $$;
 
 -- ===========================================================================
--- Done. Telegram tables are intentionally absent - Telegram MTProto Coming Soon.
+-- Done.
 -- ===========================================================================
