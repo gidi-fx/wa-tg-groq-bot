@@ -69,7 +69,12 @@ async function readJSON(response) {
   }
 }
 
-/** Real chat completion: HTTP 200 with non-empty content means the model replies. */
+/**
+ * Real chat completion: HTTP 200 with non-empty choices[0].message.content means
+ * the model replies. Reasoning models (gpt-oss) spend the token budget on
+ * reasoning first, so max_tokens must be well above 5 or content comes back empty
+ * and the probe wrongly reports a working model as "failed: HTTP 200".
+ */
 async function probeChat({ url, apiId, headers, label }) {
   const started = Date.now();
   const controller = new AbortController();
@@ -80,20 +85,37 @@ async function probeChat({ url, apiId, headers, label }) {
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify({
         model: apiId,
-        messages: [{ role: 'user', content: 'hi' }],
-        max_tokens: 5,
+        messages: [{ role: 'user', content: 'Say hi in one short sentence.' }],
+        max_tokens: 256,
       }),
       signal: controller.signal,
     });
-    const payload = await readJSON(response);
-    const content = payload?.choices?.[0]?.message?.content;
+    const raw = await response.text();
+    let payload = null;
+    try {
+      payload = raw ? JSON.parse(raw) : null;
+    } catch {
+      payload = null;
+    }
+    const choice = payload?.choices?.[0];
+    const content = choice?.message?.content;
     const working = response.ok && typeof content === 'string' && content.trim().length > 0;
+    if (!working && response.ok) {
+      console.warn(
+        `[models] ${label} ${apiId}: HTTP ${response.status} but no content `
+        + `(finish_reason=${choice?.finish_reason || 'unknown'}) raw body: ${raw.slice(0, 1200)}`,
+      );
+    }
     return {
       working,
       latency: Date.now() - started,
       error: working
         ? null
-        : String(payload?.error?.message || payload?.message || `HTTP ${response.status}`).slice(0, 220),
+        : String(
+          payload?.error?.message
+          || payload?.message
+          || (response.ok ? `HTTP ${response.status} with empty content` : `HTTP ${response.status}`),
+        ).slice(0, 220),
       status: response.status,
       label,
     };
