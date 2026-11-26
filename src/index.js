@@ -1,1 +1,1 @@
-base64 src index content
+base64 src index
