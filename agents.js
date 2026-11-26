@@ -8,6 +8,19 @@ import { getHistory, addMessage } from './userStore.js';
 
 export const CHAT_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 export const TRANSCRIBE_MODEL = process.env.GROQ_TRANSCRIBE_MODEL || 'whisper-large-v3';
+// Voice-note replies: Groq TTS (free tier) renders the reply as ogg/opus, which
+// WhatsApp plays as a normal voice message.
+export const TTS_MODEL = process.env.GROQ_TTS_MODEL || 'playai-tts';
+export const TTS_VOICE = process.env.GROQ_TTS_VOICE || 'Fritz-PlayAI';
+export const TTS_FORMAT = process.env.GROQ_TTS_FORMAT || 'ogg';
+
+const TTS_MIME = {
+  ogg: 'audio/ogg; codecs=opus',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  flac: 'audio/flac',
+  mulaw: 'audio/basic',
+};
 
 // Free Groq models, tried in order. The last one is the long-standing stable text model.
 const FALLBACK_MODELS = ['openai/gpt-oss-20b', 'llama-3.3-70b-versatile'];
@@ -110,6 +123,31 @@ export async function askAgent(phone, userText, platform = 'whatsapp') {
   addMessage(phone, 'assistant', reply);
   console.log(`[agent] ${platform} reply to ${phone}: ${reply.slice(0, 120)}`);
   return reply;
+}
+
+/**
+ * Text -> speech with Groq TTS. Returns { buffer, mimetype } so the caller can
+ * send it straight to WhatsApp as a voice note.
+ */
+export async function synthesizeSpeech(text) {
+  const input = String(text || '')
+    .replace(/[*_~`]/g, '')
+    .trim();
+  if (!input) throw new Error('synthesizeSpeech called with empty text');
+
+  const groq = getGroq();
+  const speech = await groq.audio.speech.create({
+    model: TTS_MODEL,
+    voice: TTS_VOICE,
+    input: input.slice(0, 4000),
+    response_format: TTS_FORMAT,
+  });
+  const arrayBuffer = await speech.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  if (!buffer.length) throw new Error('Groq TTS returned empty audio');
+
+  console.log(`[tts] generated ${buffer.length} bytes (${TTS_MODEL}/${TTS_VOICE}/${TTS_FORMAT})`);
+  return { buffer, mimetype: TTS_MIME[TTS_FORMAT] || 'audio/ogg' };
 }
 
 export async function transcribeAudio(buffer, fileName = 'audio.ogg') {
