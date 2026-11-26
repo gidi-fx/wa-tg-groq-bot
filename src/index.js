@@ -82,9 +82,9 @@ const upload = multer({
 });
 
 /**
- * Latest QR / pairing payload pushed by Evolution webhooks, per instance.
- * `qrcode.updated` is NOT ignored any more: it is the only reliable way to get
- * a real pairingCode, because /instance/connect often returns the QR only.
+ * Latest QR payload pushed by Evolution webhooks, per instance.
+ * `qrcode.updated` carries QR data only - the pairing code always comes from
+ * GET /instance/connect and is never read from this cache.
  */
 const LATEST_QR = new Map();
 
@@ -507,20 +507,24 @@ const connectInstanceHandler = asyncRoute(async (req, res) => {
 
   const webhookUrl = `${baseUrl(req)}/webhook/${encodeURIComponent(instance)}`;
   const ensured = await evo.ensureInstance(instance, webhookUrl);
+  // One connect call only. The pairing code comes from this response and nowhere else;
+  // the qrcode.updated webhook never carries it, and a second call invalidates the code.
   const data = await evo.connectInstance(instance, number);
 
-  // The webhook may already have pushed a pairing code; prefer the freshest one.
-  const pushed = LATEST_QR.get(instance);
-  const pairingCode = data.pairingCode || pushed?.pairingCode || null;
-  const base64 = data.base64 || pushed?.base64 || null;
+  console.log(
+    `[connect] ${instance}: pairingCode=${data.pairingCode ? 'yes' : 'no'} qr=${data.base64 ? 'yes' : 'no'}`,
+  );
 
   res.json({
     ok: true,
-    ...data,
-    pairingCode,
-    base64,
+    instance: data.instance,
+    number: data.number,
+    state: data.state,
+    pairingCode: data.pairingCode || null,
+    qr: data.pairingCode ? null : data.base64 || null,
+    base64: data.base64 || null,
+    count: data.count,
     created: ensured.created,
-    source: data.pairingCode ? 'connect' : pushed?.pairingCode ? 'webhook' : null,
   });
 });
 
@@ -534,29 +538,24 @@ app.get('/api/instance/connect/:instance', connectInstanceHandler);
 app.post('/instance/connect/:instance', connectInstanceHandler);
 app.get('/instance/connect/:instance', connectInstanceHandler);
 
-/** Latest QR / pairing code pushed by the Evolution webhook for an instance. */
+/** Latest QR data pushed by the Evolution webhook for an instance (never a pairing code). */
 app.get(
   '/api/instance/qr/:instance',
   asyncRoute(async (req, res) => {
     const instance = String(req.params.instance || '').trim();
+    // Cache read only: never call connect from here, because every extra connect
+    // call invalidates the pairing code the user is trying to enter.
     const cached = LATEST_QR.get(instance) || null;
-    if (cached) return res.json({ ok: true, instance, ...cached });
-
-    // Nothing pushed yet - ask Evolution directly.
-    try {
-      const data = await evo.connectInstance(instance, '');
-      res.json({
-        ok: true,
-        instance,
-        pairingCode: data.pairingCode || null,
-        base64: data.base64 || null,
-        code: null,
-        source: 'connect',
-        updatedAt: new Date().toISOString(),
-      });
-    } catch (err) {
-      res.json({ ok: true, instance, pairingCode: null, base64: null, code: null, error: err.message });
-    }
+    res.json({
+      ok: true,
+      instance,
+      pairingCode: null,
+      base64: cached?.base64 || null,
+      code: cached?.code || null,
+      count: cached?.count ?? null,
+      updatedAt: cached?.updatedAt || null,
+      source: 'webhook',
+    });
   }),
 );
 
@@ -594,23 +593,20 @@ async function handleWebhook(instance, payload) {
   const event = String(payload.event || payload.type || '').toLowerCase();
   const instanceName = payload.instance || payload.instanceName || instance || 'unknown';
 
-  // QR + pairing code events must be kept: this is where pairingCode really comes from.
+  // qrcode.updated only ever carries QR data. It is cached for the QR panel,
+  // but the pairing code is never read from it - that only comes from connect.
   if (event.includes('qrcode') || event.includes('qr')) {
     const data = payload.data && typeof payload.data === 'object' ? payload.data : payload;
     const qr = data.qrcode && typeof data.qrcode === 'object' ? data.qrcode : data;
-    const rawCode = qr.pairingCode ?? data.pairingCode ?? qr.code ?? qr.qrcode ?? null;
-    const codeDigits = rawCode ? String(rawCode).replace(/\D/g, '') : '';
     const record = {
-      pairingCode: codeDigits.length === 8 ? codeDigits : null,
-      code: rawCode ? String(rawCode) : null,
+      pairingCode: null,
+      code: qr.code ? String(qr.code) : null,
       base64: qr.base64 || data.base64 || null,
       count: qr.count ?? data.count ?? null,
       updatedAt: new Date().toISOString(),
     };
     LATEST_QR.set(instanceName, record);
-    console.log(
-      `[webhook] qrcode.updated ${instanceName}: pairingCode=${record.pairingCode || 'none'} base64=${record.base64 ? 'yes' : 'no'}`,
-    );
+    console.log(`[webhook] qrcode.updated ${instanceName}: base64=${record.base64 ? 'yes' : 'no'}`);
     return;
   }
 
