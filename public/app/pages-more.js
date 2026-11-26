@@ -135,7 +135,7 @@
         + '</div><p class="mt-3 text-xs text-slate-500 dark:text-slate-400">Models are tested live on the server; the Agents page only shows models that actually replied.</p></div>'
         + '</div>'
         + '<div class="space-y-5">'
-        + '<div class="' + cardCls + ' p-5"><h2 class="text-sm font-bold">Modes</h2><div class="mt-3 space-y-2 text-xs text-slate-600 dark:text-slate-300"><p><b>Free:</b> Groq models are always free. OpenRouter <b>:free</b> models work with the server key.</p><p><b>Paid:</b> Groq paid models and paid OpenRouter models, marked with a yellow badge.</p><p><b>Fallback:</b> selected model → groq/llama-3.1-8b-instant → error.</p></div></div>'
+        + '<div class="' + cardCls + ' p-5"><h2 class="text-sm font-bold">Modes</h2><div class="mt-3 space-y-2 text-xs text-slate-600 dark:text-slate-300"><p><b>Free:</b> Groq models are always free. OpenRouter <b>:free</b> models work with the server key.</p><p><b>Paid:</b> paid OpenRouter models, marked with a yellow badge.</p><p><b>Groq:</b> only <code>gpt-oss-120b</code> and <code>gpt-oss-20b</code> are allowed. Any other model must be chosen under OpenRouter.</p><p><b>Fallback:</b> selected model → groq/openai/gpt-oss-20b → error.</p></div></div>'
         + '<div class="' + cardCls + ' p-5"><h2 class="text-sm font-bold">Schema</h2><p class="mt-2 text-xs text-slate-500 dark:text-slate-400">Run <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">supabase/schema.sql</code> once to create tables, indexes, the <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">agent-media</code> bucket and the inbox RLS policy. Re-running it adds <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">agents.connected_instance</code>.</p></div>'
         + '</div></div>';
     }

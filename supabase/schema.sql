@@ -16,7 +16,7 @@ create table if not exists public.agents (
   instruction text default '',
   voice_enabled boolean not null default false,
   media_enabled boolean not null default false,
-  model text not null default 'groq/llama-3.3-70b-versatile',
+  model text not null default 'groq/openai/gpt-oss-120b',
   media_files jsonb not null default '[]'::jsonb,
   connected_instance text,
   created_at timestamptz not null default now()
