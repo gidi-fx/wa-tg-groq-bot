@@ -137,18 +137,48 @@
           const number = instanceNumber(item.name);
           return '<div class="flex flex-col gap-2 px-5 py-3 sm:flex-row sm:items-center sm:justify-between">'
             + '<div class="min-w-0"><p class="truncate text-sm font-semibold">' + esc(number ? 'Connected as ' + number : 'Linked WhatsApp') + '</p><p class="truncate text-xs text-slate-500 dark:text-slate-400">' + esc(item.profileName || '—') + '</p></div>'
-            + '<div class="flex items-center gap-2"><span class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ' + (connected ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'border-slate-300 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400') + '">' + esc(item.status || 'unknown') + '</span>'
-            + '<button data-select="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs">Select</button></div></div>';
+            + '<div class="flex flex-wrap items-center gap-2">'
+            + '<span class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ' + (connected ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'border-slate-300 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400') + '">' + esc(item.status || 'unknown') + '</span>'
+            + '<button data-select="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs">Select</button>'
+            + (item.status === 'connecting' ? '<button data-reconnect="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs text-emerald-600 dark:text-emerald-400">Reconnect</button>' : '')
+            + '<button data-delete="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs text-rose-600 dark:text-rose-400">Delete</button>'
+            + '</div></div>';
         }).join('');
-        $$('[data-select]', list).forEach((button) =>
+        $$('[data-select]', list).forEach((button) => {
           button.addEventListener('click', () => {
             instance = button.dataset.select;
             if (instanceNumber(instance)) phoneInput.value = instanceNumber(instance);
             renderStatus('');
             refreshStatus();
             getQR();
-          }),
-        );
+          });
+        });
+        $$('[data-delete]', list).forEach((button) => {
+          button.addEventListener('click', async () => {
+            const instanceName = button.dataset.delete;
+            if (!confirm('Delete instance ' + instanceName + '?')) return;
+            try {
+              await api('/api/instance/delete/' + encodeURIComponent(instanceName), { method: 'DELETE' });
+              await loadInstances();
+              renderInstances();
+              refreshStatus();
+              toast('Instance deleted');
+            } catch (error) { toast(error.message, 'error'); }
+          });
+        });
+        $$('[data-reconnect]', list).forEach((button) => {
+          button.addEventListener('click', async () => {
+            const instanceName = button.dataset.reconnect;
+            if (!confirm('Reconnect instance ' + instanceName + '?')) return;
+            try {
+              await api('/api/instance/reconnect/' + encodeURIComponent(instanceName), { method: 'POST' });
+              await loadInstances();
+              renderInstances();
+              refreshStatus();
+              toast('Reconnecting…');
+            } catch (error) { toast(error.message, 'error'); }
+          });
+        });
       }
 
       async function getQR() {
