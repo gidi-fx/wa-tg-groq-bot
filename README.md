@@ -5,7 +5,7 @@ WhatsApp (Evolution API) and Telegram (MTProto user login) bridge with Groq agen
 - **No bot.** No bot token, no Telegraf. Telegram runs as real user accounts over MTProto.
 - **Multi-user Telegram.** One `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` for the whole app; every user logs in with their own phone number and login code.
 - **No instance name in env.** WhatsApp instances are created on demand and taken from the webhook payload.
-- **Voice notes** are transcribed with Groq `whisper-large-v3`; replies come from the free Groq model in `GROQ_MODEL` (default `openai/gpt-oss-120b`, falling back to `openai/gpt-oss-20b` and then `llama-3.3-70b-versatile`).
+- **Voice notes** are transcribed with Groq `whisper-large-v3` and answered with a voice note (Groq TTS `playai-tts`); replies come from the free Groq model in `GROQ_MODEL` (default `openai/gpt-oss-120b`, falling back to `openai/gpt-oss-20b` and then `llama-3.3-70b-versatile`).
 - **Phone linking.** WhatsApp and Telegram with the same phone number share one user record and one conversation history.
 
 ## Environment
@@ -127,6 +127,12 @@ POST https://YOUR-APP/webhook/evolution
 Enable the `MESSAGES_UPSERT` event. The instance name is read from the webhook payload (`instance`, or `?instance=` as a fallback, otherwise `any`), and the same name is used to send the reply - nothing is hardcoded.
 
 Text, captions and voice notes are supported. Group JIDs (`@g.us`) and status broadcasts are ignored, and messages sent by the account itself are skipped.
+
+How a reply is delivered:
+
+- A **typing indicator** (`POST /chat/sendPresence`) is shown before the Groq call and stays visible at least `WHATSAPP_TYPING_MS` (default 2500 ms), then `paused` is sent just before the reply.
+- Replies are sent **quoted** to the incoming message.
+- A **voice note gets a voice note back**: the reply is rendered with Groq TTS (`playai-tts`, ogg/opus) and sent with `POST /message/sendWhatsAppAudio`. If TTS fails the same reply goes out as text, so a voice note is never left unanswered.
 
 ## Phone linking
 
