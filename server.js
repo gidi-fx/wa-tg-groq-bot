@@ -24,6 +24,7 @@ import {
   initWhatsAppClients,
   handleEvolutionPayload,
   sendWhatsAppMessage,
+  sendPresence,
   fetchInstances,
   createInstance,
   connectInstance,
@@ -298,12 +299,37 @@ process.on('unhandledRejection', (reason) => {
   logError('[server] unhandled rejection', reason instanceof Error ? reason : new Error(String(reason)));
 });
 
-/** Groq reply + Evolution send, used as the WhatsApp message handler. */
-async function handleWhatsAppMessage({ instance, phone, text }) {
-  const reply = await askAgent(phone, text, 'whatsapp');
-  await sendWhatsAppMessage(instance, phone, reply);
-  console.log(`[whatsapp] replied to ${phone}: ${reply.slice(0, 120)}`);
-  return reply;
+const TYPING_MS = Number(process.env.WHATSAPP_TYPING_MS || 2500);
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+/**
+ * Groq reply + Evolution send, used as the WhatsApp message handler.
+ * Typing indicator starts before the Groq call and stays visible at least
+ * TYPING_MS (2.5s), then the reply is sent quoted to the incoming message.
+ */
+async function handleWhatsAppMessage({ instance, phone, text, quoted, messageType, isVoice }) {
+  await sendPresence(instance, phone, 'composing');
+  const startedAt = Date.now();
+
+  try {
+    const reply = await askAgent(phone, text, 'whatsapp');
+
+    const elapsed = Date.now() - startedAt;
+    if (elapsed < TYPING_MS) await sleep(TYPING_MS - elapsed);
+    await sendPresence(instance, phone, 'paused');
+
+    await sendWhatsAppMessage(instance, phone, reply, { quoted });
+    console.log(
+      `[whatsapp] replied to ${phone} (${messageType || 'text'}${isVoice ? ', voice' : ''}): ${reply.slice(0, 120)}`,
+    );
+    return reply;
+  } catch (err) {
+    await sendPresence(instance, phone, 'paused');
+    throw err;
+  }
 }
 
 async function start() {
