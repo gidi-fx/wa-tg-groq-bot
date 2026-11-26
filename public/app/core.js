@@ -359,6 +359,18 @@
       return state.catalog;
     }
 
+    /** Phone number encoded in an auto-generated instance name (wa-<digits>), else null. */
+    function instanceNumber(name) {
+      const match = /^wa-(\d+)$/.exec(String(name || '').trim());
+      return match ? match[1] : null;
+    }
+
+    /** "Connected as 234..." — never the raw Evolution instance name. */
+    function connectedAsLabel(name) {
+      const number = instanceNumber(name);
+      return number ? 'Connected as ' + number : 'No WhatsApp connected';
+    }
+
     async function loadInstances() {
       try {
         const data = await api('/api/instances');
