@@ -1,685 +1,439 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>WhatsApp · Telegram · Groq — Dashboard</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WhatsApp Groq Router v2</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%2310b981'/><text x='50' y='68' font-size='52' text-anchor='middle' font-family='sans-serif' font-weight='bold' fill='%23020617'>W</text></svg>" />
+  <script>
+    (function () {
+      var saved = localStorage.getItem('theme');
+      var dark = saved ? saved === 'dark' : true;
+      document.documentElement.classList.toggle('dark', dark);
+    })();
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
+      darkMode: 'class',
       theme: {
         extend: {
-          colors: { accent: '#8b5cf6', card: '#1a1a1a', ink: '#0f0f0f' },
+          colors: { brand: { 400: '#34d399', 500: '#10b981', 600: '#059669' } },
+          fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'] },
         },
       },
     };
   </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>
-    html { color-scheme: dark; }
-    body { background: #0f0f0f; }
-    .card { background: #1a1a1a; border: 1px solid rgba(255, 255, 255, 0.06); }
-    .panel { background: #131313; border: 1px solid rgba(255, 255, 255, 0.05); }
-    .input { background: #0f0f0f; border: 1px solid rgba(255, 255, 255, 0.1); color: #f8fafc; }
-    .input::placeholder { color: #64748b; }
-    .input:focus { outline: none; border-color: #8b5cf6; box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.18); }
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-thumb { background: #333; border-radius: 99px; }
-    .fade-in { animation: fade 0.25s ease-out; }
-    @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    html { scroll-behavior: smooth; }
+    body { font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    ::-webkit-scrollbar { width: 9px; height: 9px; }
+    ::-webkit-scrollbar-thumb { background: rgba(100, 116, 139, 0.45); border-radius: 999px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    .spinner { width: 22px; height: 22px; border: 2.5px solid rgba(16,185,129,0.2); border-top-color: #10b981; border-radius: 50%; animation: spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .fade-in { animation: fade-in 0.18s ease-out; }
+    @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .scroll-thin { scrollbar-width: thin; }
+    .qr-box img { image-rendering: pixelated; }
+    input[type="checkbox"].toggle { appearance: none; width: 42px; height: 24px; border-radius: 999px; background: #334155; position: relative; cursor: pointer; transition: background 0.15s; flex: none; }
+    input[type="checkbox"].toggle::after { content: ''; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform 0.15s; }
+    input[type="checkbox"].toggle:checked { background: #10b981; }
+    input[type="checkbox"].toggle:checked::after { transform: translateX(18px); }
   </style>
 </head>
-<body class="min-h-screen text-slate-100 antialiased">
-  <div id="toast" class="pointer-events-none fixed left-1/2 top-4 z-50 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 rounded-xl px-4 py-3 text-sm font-medium opacity-0 shadow-lg"></div>
+<body class="min-h-screen bg-slate-50 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100">
 
-  <header class="sticky top-0 z-20 border-b border-white/5 bg-[#0f0f0f]/90 backdrop-blur">
-    <div class="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-4">
-      <div class="flex min-w-0 items-center gap-3">
-        <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-lg font-black">⚡</div>
-        <div class="min-w-0">
-          <h1 class="truncate text-sm font-semibold leading-tight sm:text-base">WhatsApp Telegram Groq AI Bot</h1>
-          <p class="text-[11px] text-slate-400">gidi-fx · multi-user bridge</p>
-        </div>
-      </div>
-      <div class="flex shrink-0 items-center gap-2">
-        <span class="flex items-center gap-2 rounded-full bg-white/5 px-3 py-1.5 text-[11px] font-medium text-slate-300">
-          <span id="statusDot" class="h-2 w-2 rounded-full bg-amber-400"></span>
-          <span id="statusText">Connecting…</span>
-        </span>
-        <button id="refreshBtn" class="rounded-xl bg-white/5 px-3 py-1.5 text-[11px] font-medium text-slate-200 hover:bg-white/10">Refresh</button>
+  <aside class="fixed inset-y-0 left-0 z-40 hidden w-64 flex-col border-r border-slate-200 bg-white md:flex dark:border-slate-800 dark:bg-slate-900/60">
+    <div class="flex items-center gap-3 px-5 py-5">
+      <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500 text-lg font-extrabold text-slate-950">W</div>
+      <div>
+        <p class="text-sm font-bold leading-tight">WhatsApp Router</p>
+        <p class="text-[11px] font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">Groq · OpenRouter · v2</p>
       </div>
     </div>
-  </header>
-
-  <main class="mx-auto max-w-6xl px-4 pb-16 pt-5">
-    <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-
-      <!-- WhatsApp -->
-      <section class="card rounded-2xl p-5">
-        <div class="mb-4 flex items-start justify-between gap-3">
-          <div class="flex items-center gap-2">
-            <span class="text-lg">🟢</span>
-            <div>
-              <h2 class="text-sm font-semibold">WhatsApp</h2>
-              <p class="text-[11px] text-slate-400">Evolution API</p>
-            </div>
-          </div>
-          <span id="waStatusPill" class="rounded-full bg-white/5 px-2.5 py-1 text-[11px] font-semibold text-slate-300">…</span>
-        </div>
-
-        <div class="panel rounded-xl p-3">
-          <div class="mb-2 flex items-center justify-between">
-            <p class="text-[11px] font-medium uppercase tracking-wide text-slate-400">Instances</p>
-            <span id="instanceCount" class="text-[10px] text-slate-500">0</span>
-          </div>
-          <div id="instancesList" class="space-y-2 text-xs text-slate-400">Loading…</div>
-        </div>
-
-        <form id="instanceForm" class="mt-4">
-          <label class="mb-1 block text-[11px] font-medium text-slate-400" for="instanceName">Create instance</label>
-          <div class="flex gap-2">
-            <input id="instanceName" class="input w-full rounded-xl px-3 py-2 text-xs" placeholder="e.g. my-whatsapp" autocomplete="off" />
-            <button id="createInstanceBtn" type="submit" class="shrink-0 rounded-xl bg-accent px-3 py-2 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-60">Create</button>
-          </div>
-        </form>
-
-        <div id="qrWrap" class="panel mt-4 hidden rounded-xl p-3 text-center fade-in">
-          <p class="mb-2 text-[11px] text-slate-400">Scan with WhatsApp → Linked devices</p>
-          <img id="qrImage" alt="WhatsApp QR code" class="mx-auto h-44 w-44 rounded-lg bg-white object-contain p-2" />
-          <p id="qrState" class="mt-2 text-[11px] text-slate-400"></p>
-        </div>
-      </section>
-
-      <!-- Telegram -->
-      <section class="card rounded-2xl p-5">
-        <div class="mb-4 flex items-start justify-between gap-3">
-          <div class="flex items-center gap-2">
-            <span class="text-lg">✈️</span>
-            <div>
-              <h2 class="flex items-center gap-2 text-sm font-semibold">
-                Telegram
-                <span class="rounded-full bg-violet-500/20 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-violet-300">Main</span>
-              </h2>
-              <p class="text-[11px] text-slate-400">MTProto phone login · no bot token</p>
-            </div>
-          </div>
-          <span id="tgStatusPill" class="rounded-full bg-white/5 px-2.5 py-1 text-[11px] font-semibold text-slate-300">…</span>
-        </div>
-
-        <div class="mb-4 grid grid-cols-3 gap-2">
-          <div class="panel rounded-xl px-3 py-2">
-            <p class="text-[10px] uppercase tracking-wide text-slate-500">Active</p>
-            <p id="activeClients" class="text-lg font-semibold">0</p>
-          </div>
-          <div class="panel rounded-xl px-3 py-2">
-            <p class="text-[10px] uppercase tracking-wide text-slate-500">From ENV</p>
-            <p id="fromEnv" class="text-lg font-semibold">0</p>
-          </div>
-          <div class="panel rounded-xl px-3 py-2">
-            <p class="text-[10px] uppercase tracking-wide text-slate-500">From file</p>
-            <p id="fromFile" class="text-lg font-semibold">0</p>
-          </div>
-        </div>
-
-        <form id="loginForm" class="panel rounded-xl p-4">
-          <p class="mb-3 text-[11px] font-medium uppercase tracking-wide text-slate-400">Login with phone number</p>
-          <label class="mb-1 block text-[11px] text-slate-400" for="phoneInput">Phone</label>
-          <input id="phoneInput" class="input w-full rounded-xl px-3 py-2.5 text-sm" placeholder="+234 802 123 4567" inputmode="tel" autocomplete="tel" />
-          <button id="sendCodeBtn" type="submit" class="mt-3 w-full rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-60">Send Code</button>
-
-          <div id="verifyBox" class="mt-4 hidden border-t border-white/5 pt-4 fade-in">
-            <p class="mb-3 text-[11px] text-slate-400">Code sent to <span id="verifyPhone" class="font-semibold text-slate-200"></span></p>
-            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
-                <label class="mb-1 block text-[11px] text-slate-400" for="codeInput">Login code</label>
-                <input id="codeInput" class="input w-full rounded-xl px-3 py-2 text-sm" placeholder="12345" inputmode="numeric" autocomplete="one-time-code" />
-              </div>
-              <div>
-                <label class="mb-1 block text-[11px] text-slate-400" for="passwordInput">2FA password (optional)</label>
-                <input id="passwordInput" type="password" class="input w-full rounded-xl px-3 py-2 text-sm" placeholder="only if enabled" autocomplete="current-password" />
-              </div>
-            </div>
-            <div class="mt-3 flex gap-2">
-              <button id="verifyBtn" type="button" class="flex-1 rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-60">Verify</button>
-              <button id="resetLoginBtn" type="button" class="rounded-xl bg-white/5 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-white/10">Cancel</button>
-            </div>
-          </div>
-        </form>
-
-        <div class="mt-4">
-          <div class="mb-2 flex items-center justify-between">
-            <p class="text-[11px] font-medium uppercase tracking-wide text-slate-400">Sessions</p>
-            <button id="refreshSessionsBtn" class="rounded-lg bg-white/5 px-2 py-1 text-[11px] text-slate-300 hover:bg-white/10">↻ Refresh</button>
-          </div>
-          <div id="sessionsList" class="space-y-2 text-xs text-slate-400">Loading…</div>
-        </div>
-
-        <div class="panel mt-4 rounded-xl p-4">
-          <div class="mb-2 flex items-center justify-between gap-2">
-            <p class="text-[11px] font-medium uppercase tracking-wide text-slate-400">Env backup · TELEGRAM_SESSIONS_JSON</p>
-            <button id="copyEnvBtn" class="shrink-0 rounded-lg bg-white/5 px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:bg-white/10">Copy</button>
-          </div>
-          <textarea id="envBackupValue" readonly rows="3" class="w-full resize-none rounded-lg bg-[#0f0f0f] p-2 font-mono text-[10px] leading-relaxed text-slate-400" placeholder="No sessions saved yet — log in above to generate one"></textarea>
-          <div class="mt-2 flex items-center justify-between gap-2">
-            <p class="text-[11px] leading-relaxed text-amber-300/90">⚠️ Copy this to Render ENV to survive redeploys — Render free tier wipes files.</p>
-            <span id="envBackupCount" class="shrink-0 text-[10px] text-slate-500">0 sessions</span>
-          </div>
-        </div>
-      </section>
-
-      <!-- Users -->
-      <section class="card rounded-2xl p-5">
-        <div class="mb-4 flex items-center justify-between gap-3">
-          <div class="flex items-center gap-2">
-            <span class="text-lg">👥</span>
-            <div>
-              <h2 class="text-sm font-semibold">Users</h2>
-              <p class="text-[11px] text-slate-400">Linked WA + TG identities</p>
-            </div>
-          </div>
-          <span id="userCount" class="rounded-full bg-white/5 px-2.5 py-1 text-[11px] text-slate-400">0</span>
-        </div>
-        <input id="userSearch" class="input mb-3 w-full rounded-xl px-3 py-2 text-xs" placeholder="Search phone, name or JID…" autocomplete="off" />
-        <div class="panel overflow-x-auto rounded-xl">
-          <table class="min-w-full text-left text-xs">
-            <thead class="text-[10px] uppercase tracking-wide text-slate-500">
-              <tr>
-                <th class="px-3 py-2 font-medium">Phone</th>
-                <th class="px-3 py-2 font-medium">Telegram</th>
-                <th class="px-3 py-2 font-medium">WhatsApp</th>
-                <th class="px-3 py-2 font-medium">History</th>
-                <th class="px-3 py-2 font-medium">Last seen</th>
-              </tr>
-            </thead>
-            <tbody id="usersBody">
-              <tr><td colspan="5" class="px-3 py-6 text-center text-slate-500">Loading…</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- System -->
-      <section class="card rounded-2xl p-5">
-        <div class="mb-4 flex items-center gap-2">
-          <span class="text-lg">⚙️</span>
-          <div>
-            <h2 class="text-sm font-semibold">System</h2>
-            <p class="text-[11px] text-slate-400">Models, endpoints &amp; logs</p>
-          </div>
-        </div>
-
-        <div class="panel rounded-xl p-3">
-          <p class="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">Models</p>
-          <div class="space-y-1.5 text-xs">
-            <div class="flex items-center justify-between gap-2">
-              <span class="text-slate-400">Chat</span>
-              <span id="chatModel" class="font-mono text-[11px] text-violet-300">—</span>
-            </div>
-            <div class="flex items-center justify-between gap-2">
-              <span class="text-slate-400">Transcription</span>
-              <span id="transcribeModel" class="font-mono text-[11px] text-violet-300">—</span>
-            </div>
-            <div class="flex items-center justify-between gap-2">
-              <span class="text-slate-400">Uptime</span>
-              <span id="uptime" class="text-[11px] text-slate-300">—</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="panel mt-3 rounded-xl p-3">
-          <p class="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">Endpoints</p>
-          <div class="flex flex-wrap gap-1.5">
-            <a class="rounded-lg bg-white/5 px-2.5 py-1 text-[11px] text-slate-300 hover:bg-white/10" href="/health" target="_blank" rel="noreferrer">/health</a>
-            <a class="rounded-lg bg-white/5 px-2.5 py-1 text-[11px] text-slate-300 hover:bg-white/10" href="/webhook/evolution" target="_blank" rel="noreferrer">/webhook/evolution</a>
-            <a class="rounded-lg bg-white/5 px-2.5 py-1 text-[11px] text-slate-300 hover:bg-white/10" href="/users" target="_blank" rel="noreferrer">/users</a>
-            <a class="rounded-lg bg-white/5 px-2.5 py-1 text-[11px] text-slate-300 hover:bg-white/10" href="/telegram/sessions" target="_blank" rel="noreferrer">/telegram/sessions</a>
-            <a class="rounded-lg bg-white/5 px-2.5 py-1 text-[11px] text-slate-300 hover:bg-white/10" href="/api/status" target="_blank" rel="noreferrer">/api/status</a>
-            <a class="rounded-lg bg-white/5 px-2.5 py-1 text-[11px] text-slate-300 hover:bg-white/10" href="/logs" target="_blank" rel="noreferrer">/logs</a>
-          </div>
-        </div>
-
-        <div class="panel mt-3 rounded-xl p-3">
-          <p class="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">Log tail</p>
-          <pre id="logTail" class="max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-slate-400">Loading…</pre>
-        </div>
-      </section>
-
+    <nav id="sidebar-nav" class="flex-1 space-y-1 px-3 py-2"></nav>
+    <div class="space-y-3 px-4 pb-5">
+      <div class="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">Telegram</p>
+        <p class="mt-1 text-xs font-medium leading-snug text-amber-700 dark:text-amber-300">Telegram MTProto Coming Soon (Disabled)</p>
+      </div>
+      <div class="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-800">
+        <span class="text-xs font-medium text-slate-500 dark:text-slate-400">Dark mode</span>
+        <button data-theme-toggle class="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="Toggle theme">
+          <span data-theme-label>On</span>
+        </button>
+      </div>
     </div>
-  </main>
+  </aside>
 
-  <script>
-    const $ = (id) => document.getElementById(id);
-    const state = { phone: '', phoneCodeHash: '', status: null, users: [], search: '' };
+  <div class="md:pl-64">
+    <header class="sticky top-0 z-30 border-b border-slate-200 bg-white/80 backdrop-blur dark:border-slate-800 dark:bg-slate-950/80">
+      <div class="flex items-center justify-between gap-3 px-4 py-3 sm:px-6">
+        <div class="flex min-w-0 items-center gap-3">
+          <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500 text-sm font-extrabold text-slate-950 md:hidden">W</div>
+          <div class="min-w-0">
+            <h1 id="page-title" class="truncate text-base font-bold sm:text-lg">Dashboard</h1>
+            <p id="page-subtitle" class="hidden truncate text-xs text-slate-500 sm:block dark:text-slate-400">WhatsApp agents, inbox and groups</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="hidden items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-700 lg:inline-flex dark:text-amber-300">
+            <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+            Telegram MTProto Coming Soon (Disabled)
+          </span>
+          <button data-theme-toggle class="rounded-lg border border-slate-300 p-2 text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="Toggle theme">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v2m0 14v2M5.6 5.6l1.4 1.4m10 10l1.4 1.4M3 12h2m14 0h2M5.6 18.4l1.4-1.4m10-10l1.4-1.4"/><circle cx="12" cy="12" r="3.5"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="mobile-nav" class="flex gap-1 overflow-x-auto px-3 pb-2 md:hidden"></div>
+      <div id="persistence-banner" class="hidden border-t border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-xs font-medium leading-relaxed text-amber-800 dark:text-amber-200 sm:px-6"></div>
+    </header>
 
+    <main class="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
+      <div id="view"></div>
+    </main>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast-root" class="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-full max-w-sm flex-col gap-2 px-4 sm:px-0"></div>
+
+  <script type="module">
+    /* ============================== state ================================= */
+    const state = {
+      config: null,
+      catalog: { free: [], paid: [], source: 'unknown' },
+      agents: [],
+      instances: [],
+      cleanup: null,
+      currentJid: null,
+      inbox: { conversations: [], messages: [], agents: [] },
+      groups: { selected: new Set() },
+      playground: { agentId: null, history: [], messages: [] },
+    };
+
+    const TELEGRAM = 'Telegram MTProto Coming Soon (Disabled)';
+    const SUPABASE_WARNING = '⚠️ Supabase not connected - optional - agents, inbox, groups, media will NOT be saved permanently. Add SUPABASE_URL + SUPABASE_KEY in .env to enable persistence. Get free at supabase.com';
+    const titles = {
+      '/': ['Dashboard', 'Overview of your WhatsApp AI router'],
+      '/connect': ['Connect WhatsApp', 'Link an Evolution API instance by QR or phone number'],
+      '/agents': ['Agents', 'Create and manage AI agents with your own keys'],
+      '/inbox': ['Inbox', 'All chats, replies and agent assignment'],
+      '/groups': ['Groups', 'Sync WhatsApp groups and assign hosts'],
+      '/playground': ['Playground', 'Test an agent without WhatsApp'],
+      '/settings': ['Settings', 'Bring your own Groq and OpenRouter keys'],
+      '/telegram': ['Telegram', TELEGRAM],
+    };
+
+    const NAV = [
+      { path: '/', label: 'Dashboard', icon: '◎' },
+      { path: '/connect', label: 'Connect', icon: '⌁' },
+      { path: '/agents', label: 'Agents', icon: '✦' },
+      { path: '/inbox', label: 'Inbox', icon: '✉' },
+      { path: '/groups', label: 'Groups', icon: '⊞' },
+      { path: '/playground', label: 'Playground', icon: '▷' },
+      { path: '/settings', label: 'Settings', icon: '⚙' },
+      { path: '/telegram', label: 'Telegram', icon: '✈', badge: 'Soon' },
+    ];
+
+    const btnBase = 'inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50';
+    const btnPrimary = btnBase + ' bg-emerald-500 text-slate-950 hover:bg-emerald-400';
+    const btnGhost = btnBase + ' border border-slate-300 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800';
+    const btnDanger = btnBase + ' border border-rose-500/40 text-rose-600 hover:bg-rose-500/10 dark:text-rose-400';
+    const cardCls = 'rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900/60';
+    const inputCls = 'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/25 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100';
+    const labelCls = 'mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400';
+
+    /* ============================== utils ================================= */
+    const $ = (sel, root = document) => root.querySelector(sel);
+    const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
     const esc = (value) =>
-      String(value === undefined || value === null ? '' : value).replace(/[&<>"']/g, (char) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]
-      ));
+      String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-    function toast(message, type = 'success') {
-      const el = $('toast');
-      el.textContent = message;
-      el.className =
-        'pointer-events-none fixed left-1/2 top-4 z-50 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 rounded-xl px-4 py-3 text-sm font-medium shadow-lg transition-all duration-300 ' +
-        (type === 'error' ? 'bg-red-500/95 text-white' : 'bg-emerald-500/95 text-white');
-      clearTimeout(toast.timer);
-      toast.timer = setTimeout(() => {
-        el.className = 'pointer-events-none fixed left-1/2 top-4 z-50 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 rounded-xl px-4 py-3 text-sm font-medium opacity-0 shadow-lg transition-all duration-300';
-      }, 3500);
+    function timeAgo(value) {
+      if (!value) return '';
+      const diff = Date.now() - new Date(value).getTime();
+      if (!Number.isFinite(diff)) return '';
+      if (diff < 60_000) return 'now';
+      if (diff < 3_600_000) return Math.floor(diff / 60_000) + 'm';
+      if (diff < 86_400_000) return Math.floor(diff / 3_600_000) + 'h';
+      if (diff < 604_800_000) return Math.floor(diff / 86_400_000) + 'd';
+      return new Date(value).toLocaleDateString();
+    }
+
+    function bytes(size) {
+      const n = Number(size || 0);
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      return (n / 1024 / 1024).toFixed(1) + ' MB';
     }
 
     async function api(path, options = {}) {
-      const res = await fetch(path, {
-        credentials: 'same-origin',
-        ...options,
-        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-      });
-      let data = null;
-      try {
-        data = await res.json();
-      } catch (_) {
-        data = null;
+      const init = { method: options.method || 'GET', headers: {} };
+      if (options.body instanceof FormData) {
+        init.body = options.body;
+      } else if (options.body !== undefined) {
+        init.headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(options.body);
       }
-      if (!res.ok) throw new Error((data && data.error) || 'Request failed (' + res.status + ')');
-      return data || {};
+      const response = await fetch(path, init);
+      const text = await response.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text }; }
+      if (!response.ok) {
+        const error = new Error(data.error || ('Request failed (' + response.status + ')'));
+        error.status = response.status;
+        error.code = data.code;
+        throw error;
+      }
+      return data;
     }
 
-    function formatDate(value) {
-      if (!value) return '—';
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return '—';
-      return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    function toast(message, type = 'success') {
+      const root = $('#toast-root');
+      const tone = type === 'error'
+        ? 'border-rose-500/40 bg-rose-950/95 text-rose-100'
+        : type === 'info'
+          ? 'border-sky-500/40 bg-sky-950/95 text-sky-100'
+          : 'border-emerald-500/40 bg-emerald-950/95 text-emerald-100';
+      const el = document.createElement('div');
+      el.className = 'fade-in pointer-events-auto flex items-start gap-3 rounded-xl border px-4 py-3 text-sm font-medium shadow-xl backdrop-blur ' + tone;
+      el.innerHTML = '<span class="mt-0.5">' + (type === 'error' ? '⚠' : type === 'info' ? 'ℹ' : '✓') + '</span><span class="flex-1">' + esc(message) + '</span><button class="opacity-60 hover:opacity-100" aria-label="Dismiss">✕</button>';
+      el.querySelector('button').addEventListener('click', () => el.remove());
+      root.appendChild(el);
+      setTimeout(() => el.remove(), 5200);
     }
 
-    function formatUptime(seconds) {
-      const total = Number(seconds || 0);
-      if (!total) return '—';
-      const h = Math.floor(total / 3600);
-      const m = Math.floor((total % 3600) / 60);
-      if (h) return h + 'h ' + m + 'm';
-      if (m) return m + 'm';
-      return Math.round(total) + 's';
+    function spinner(label = 'Loading') {
+      return '<div class="flex items-center justify-center gap-3 py-16 text-sm text-slate-500 dark:text-slate-400"><div class="spinner"></div>' + esc(label) + '…</div>';
     }
 
-    function pill(el, good, goodText, badText) {
-      el.textContent = good ? goodText : badText;
-      el.className = 'rounded-full px-2.5 py-1 text-[11px] font-semibold ' +
-        (good ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300');
+    function errorBox(error, retry = true) {
+      return '<div class="' + cardCls + ' p-6"><div class="flex items-start gap-3"><span class="text-xl">⚠️</span><div class="min-w-0"><p class="font-semibold text-rose-600 dark:text-rose-400">Something went wrong</p><p class="mt-1 break-words text-sm text-slate-600 dark:text-slate-300">' + esc(error.message || String(error)) + '</p>' + (retry ? '<button id="retry-btn" class="' + btnGhost + ' mt-4">Retry</button>' : '') + '</div></div></div>';
     }
 
-    async function loadStatus() {
-      try {
-        const data = await api('/api/status');
-        state.status = data;
+    function statusPill(ok, okText = 'Configured', badText = 'Not configured') {
+      const cls = ok
+        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+        : 'border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300';
+      const text = ok ? okText : badText;
+      return '<span class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ' + cls + '"><span class="h-1.5 w-1.5 rounded-full ' + (ok ? 'bg-emerald-500' : 'bg-rose-500') + '"></span>' + esc(text) + '</span>';
+    }
 
-        $('statusDot').className = 'h-2 w-2 rounded-full bg-emerald-400';
-        $('statusText').textContent = 'Online';
+    function optionalPill(ok) {
+      const cls = ok
+        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+        : 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300';
+      return '<span class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ' + cls + '"><span class="h-1.5 w-1.5 rounded-full ' + (ok ? 'bg-emerald-500' : 'bg-amber-500') + '"></span>' + (ok ? 'Configured' : 'In-memory (optional)') + '</span>';
+    }
 
-        pill($('waStatusPill'), Boolean(data.evolutionConfigured), 'Configured', 'Not configured');
-        renderInstances(data.evolution || {});
+    function paintPersistenceBanner() {
+      const banner = $('#persistence-banner');
+      if (!banner) return;
+      if (state.config && state.config.supabase && state.config.supabase.configured === false) {
+        banner.innerHTML = '<span>⚠️ Supabase not connected - <b>optional</b> - agents, inbox, groups, media will <b>NOT</b> be saved permanently. Add <code class="rounded bg-amber-500/20 px-1">SUPABASE_URL</code> + <code class="rounded bg-amber-500/20 px-1">SUPABASE_KEY</code> in <code class="rounded bg-amber-500/20 px-1">.env</code> to enable persistence. Get free at <a href="https://supabase.com" target="_blank" rel="noopener" class="underline">supabase.com</a></span>';
+        banner.classList.remove('hidden');
+      } else {
+        banner.classList.add('hidden');
+        banner.innerHTML = '';
+      }
+    }
 
-        const telegram = data.telegram || {};
-        pill($('tgStatusPill'), Boolean(telegram.configured), 'Configured', 'Not configured');
-        $('activeClients').textContent = Number(telegram.activeClients || 0);
-        const load = data.telegramSessionsFromEnv || {};
-        $('fromEnv').textContent = Number(load.fromEnv || 0);
-        $('fromFile').textContent = Number(load.fromFile || 0);
+    function isInstanceConnected(status) {
+      return /open|connected/i.test(String(status || ''));
+    }
 
-        const backup = data.envBackup || {};
-        const field = $('envBackupValue');
-        if (backup.value) {
-          field.value = backup.value;
-          $('envBackupCount').textContent = Number(backup.count || 0) + ' session(s)';
-        } else {
-          field.value = '';
-          field.placeholder = 'No sessions saved yet — log in above to generate one';
-          $('envBackupCount').textContent = '0 sessions';
+    function modelBadge(model) {
+      const free = String(model || '').startsWith('groq/') || String(model || '').endsWith(':free');
+      const cls = free
+        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+        : 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300';
+      return '<span class="rounded-md border px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ' + cls + '">' + (free ? 'Free' : 'Paid') + '</span>';
+    }
+
+    function modelInfo(id) {
+      return [...state.catalog.free, ...state.catalog.paid].find((m) => m.id === id) || null;
+    }
+
+    function modelLabel(id) {
+      const info = modelInfo(id);
+      if (info) return info.label;
+      return String(id || '').split('/').pop();
+    }
+
+    function priceLabel(info) {
+      if (!info) return '';
+      if (info.free) return 'free';
+      if (info.pricePer1k === null || info.pricePer1k === undefined) return 'price varies';
+      if (!info.pricePer1k) return 'free';
+      return '$' + Number(info.pricePer1k).toFixed(4) + '/1k tokens';
+    }
+
+    function optionHTML(model, selected) {
+      const price = !model.free && model.pricePer1k ? ' — $' + Number(model.pricePer1k).toFixed(4) + '/1k' : '';
+      return '<option value="' + esc(model.id) + '"' + (model.id === selected ? ' selected' : '') + '>' + esc(model.label) + price + '</option>';
+    }
+
+    function modelSelectOptions(selected) {
+      const groq = state.catalog.free.filter((m) => m.id.startsWith('groq/'));
+      const orFree = state.catalog.free.filter((m) => m.id.startsWith('openrouter/'));
+      const paid = state.catalog.paid;
+      const known = groq.some((m) => m.id === selected) || orFree.some((m) => m.id === selected) || paid.some((m) => m.id === selected);
+      let html = '';
+      if (selected && !known) html += '<option value="' + esc(selected) + '" selected>' + esc(selected) + '</option>';
+      html += '<optgroup label="FREE · Groq">' + groq.map((m) => optionHTML(m, selected)).join('') + '</optgroup>';
+      html += '<optgroup label="FREE · OpenRouter">' + orFree.map((m) => optionHTML(m, selected)).join('') + '</optgroup>';
+      html += '<optgroup label="PAID · OpenRouter">' + paid.map((m) => optionHTML(m, selected)).join('') + '</optgroup>';
+      return html;
+    }
+
+    /* ============================== layout ================================ */
+    function navHTML(compact = false) {
+      return NAV.map((item) => {
+        if (compact) {
+          return '<a href="' + item.path + '" data-link data-nav="' + item.path + '" class="nav-item flex flex-none items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800">'
+            + '<span class="opacity-70">' + item.icon + '</span>' + esc(item.label)
+            + (item.badge ? '<span class="rounded bg-amber-500/20 px-1 py-0.5 text-[9px] font-bold uppercase text-amber-700 dark:text-amber-300">' + item.badge + '</span>' : '') + '</a>';
         }
-
-        const models = data.models || {};
-        $('chatModel').textContent = models.chat || '—';
-        $('transcribeModel').textContent = models.transcription || '—';
-        $('uptime').textContent = formatUptime(data.uptime);
-      } catch (err) {
-        $('statusDot').className = 'h-2 w-2 rounded-full bg-red-400';
-        $('statusText').textContent = 'Offline';
-        toast(err.message, 'error');
-      }
-    }
-
-    function renderInstances(evolution) {
-      const box = $('instancesList');
-      const instances = Array.isArray(evolution.instances) ? evolution.instances : [];
-      $('instanceCount').textContent = instances.length + ' found';
-
-      if (evolution.error) {
-        box.innerHTML = '<p class="rounded-lg bg-red-500/10 px-2.5 py-2 text-[11px] text-red-300">' + esc(evolution.error) + '</p>';
-        return;
-      }
-      if (!instances.length) {
-        box.innerHTML = '<p class="py-1">' +
-          (evolution.configured === false ? 'Evolution API not configured.' : 'No instances yet — create one below.') +
-          '</p>';
-        return;
-      }
-
-      box.innerHTML = instances.map((inst) => {
-        const isOpen = /open|connected/i.test(String(inst.status || ''));
-        return '<div class="flex items-center justify-between gap-2 rounded-lg bg-white/[0.03] px-2.5 py-2">' +
-          '<div class="min-w-0">' +
-            '<p class="truncate text-xs font-medium text-slate-200">' + esc(inst.name || 'unknown') + '</p>' +
-            '<p class="truncate text-[10px] text-slate-500">' + esc(inst.profileName || inst.number || '—') + '</p>' +
-          '</div>' +
-          '<span class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ' +
-            (isOpen ? 'bg-emerald-500/15 text-emerald-300' : 'bg-amber-500/15 text-amber-300') + '">' +
-            esc(inst.status || 'unknown') +
-          '</span>' +
-        '</div>';
+        return '<a href="' + item.path + '" data-link data-nav="' + item.path + '" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800">'
+          + '<span class="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-100 text-xs dark:bg-slate-800">' + item.icon + '</span>'
+          + '<span class="flex-1">' + esc(item.label) + '</span>'
+          + (item.badge ? '<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-700 dark:text-amber-300">' + item.badge + '</span>' : '')
+          + '</a>';
       }).join('');
     }
 
-    async function loadSessions() {
-      try {
-        renderSessions(await api('/telegram/sessions'));
-      } catch (err) {
-        $('sessionsList').innerHTML = '<p class="rounded-lg bg-red-500/10 px-3 py-2 text-red-300">' + esc(err.message) + '</p>';
-      }
-    }
-
-    function renderSessions(payload) {
-      const box = $('sessionsList');
-      const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
-      if (!sessions.length) {
-        box.innerHTML = '<p class="rounded-lg bg-white/[0.03] px-3 py-2">No Telegram sessions yet.</p>';
-        return;
-      }
-      box.innerHTML = sessions.map((session) =>
-        '<div class="flex items-center justify-between gap-2 rounded-lg bg-white/[0.03] px-3 py-2">' +
-          '<div class="min-w-0">' +
-            '<p class="truncate text-xs font-medium text-slate-200">' + esc(session.phone) + '</p>' +
-            '<p class="mt-0.5 flex flex-wrap gap-2 text-[10px]">' +
-              '<span class="' + (session.connected ? 'text-emerald-300' : 'text-slate-500') + '">' +
-                (session.connected ? '● connected' : '○ offline') + '</span>' +
-              '<span class="' + (session.sessionSaved ? 'text-violet-300' : 'text-red-300') + '">' +
-                (session.sessionSaved ? 'session saved' : 'no session') + '</span>' +
-              '<span class="text-slate-500">' + (session.listening ? 'listening' : 'not listening') + '</span>' +
-            '</p>' +
-          '</div>' +
-          '<button data-logout="' + esc(session.phone) + '" class="shrink-0 rounded-lg bg-red-500/10 px-2.5 py-1.5 text-[11px] font-semibold text-red-300 hover:bg-red-500/20">Logout</button>' +
-        '</div>'
-      ).join('');
-
-      box.querySelectorAll('[data-logout]').forEach((btn) => {
-        btn.addEventListener('click', () => logout(btn.dataset.logout));
+    function setActiveNav(path) {
+      $$('[data-nav]').forEach((el) => {
+        const active = el.getAttribute('data-nav') === path;
+        el.classList.toggle('bg-emerald-500/10', active);
+        el.classList.toggle('text-emerald-700', active);
+        el.classList.toggle('dark:text-emerald-300', active);
+        el.classList.toggle('ring-1', active);
+        el.classList.toggle('ring-emerald-500/30', active);
       });
     }
 
-    async function logout(phone) {
-      if (!phone) return;
-      if (!window.confirm('Log out Telegram session for ' + phone + '?')) return;
-      try {
-        await api('/telegram/logout', { method: 'POST', body: JSON.stringify({ phone }) });
-        toast('Logged out ' + phone);
-        await Promise.all([loadSessions(), loadStatus(), loadUsers()]);
-      } catch (err) {
-        toast(err.message, 'error');
-      }
+    function setTheme(dark) {
+      document.documentElement.classList.toggle('dark', dark);
+      localStorage.setItem('theme', dark ? 'dark' : 'light');
+      $$('[data-theme-label]').forEach((el) => (el.textContent = dark ? 'On' : 'Off'));
     }
 
-    async function loadUsers() {
-      try {
-        const data = await api('/users');
-        state.users = Array.isArray(data.users) ? data.users : [];
-        renderUsers();
-      } catch (err) {
-        $('usersBody').innerHTML = '<tr><td colspan="5" class="px-3 py-6 text-center text-red-300">' + esc(err.message) + '</td></tr>';
-      }
+    function navigate(path, replace = false) {
+      if (replace) history.replaceState({}, '', path);
+      else history.pushState({}, '', path);
+      render();
     }
 
-    function renderUsers() {
-      const tbody = $('usersBody');
-      const term = state.search.trim().toLowerCase();
-      const users = state.users.filter((user) => {
-        if (!term) return true;
-        return [user.phone, user.telegramPhone, user.waJid, user.name]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(term));
+    document.addEventListener('click', (event) => {
+      const link = event.target.closest('a[data-link]');
+      if (!link) return;
+      const href = link.getAttribute('href');
+      if (!href || !href.startsWith('/')) return;
+      event.preventDefault();
+      if (href !== location.pathname) navigate(href);
+    });
+
+    $$('[data-theme-toggle]').forEach((button) =>
+      button.addEventListener('click', () => setTheme(!document.documentElement.classList.contains('dark'))),
+    );
+
+    function openModal({ title, body, width = 'max-w-2xl' }) {
+      const root = $('#modal-root');
+      root.innerHTML = '<div class="fixed inset-0 z-50 overflow-y-auto bg-slate-950/70 p-4 backdrop-blur-sm" data-backdrop>'
+        + '<div class="fade-in mx-auto my-6 w-full ' + width + ' rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900" role="dialog" aria-modal="true">'
+        + '<div class="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 dark:border-slate-800"><h2 class="text-base font-bold">' + esc(title) + '</h2><button data-close class="rounded-lg px-2 py-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200" aria-label="Close">✕</button></div>'
+        + '<div class="max-h-[75vh] overflow-y-auto p-5">' + body + '</div></div></div>';
+
+      const close = () => {
+        root.innerHTML = '';
+        document.removeEventListener('keydown', onKey);
+      };
+      const onKey = (event) => { if (event.key === 'Escape') close(); };
+      document.addEventListener('keydown', onKey);
+      root.querySelector('[data-close]').addEventListener('click', close);
+      root.querySelector('[data-backdrop]').addEventListener('click', (event) => {
+        if (event.target === root.querySelector('[data-backdrop]')) close();
       });
-
-      $('userCount').textContent = users.length + ' of ' + state.users.length;
-      if (!users.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="px-3 py-6 text-center text-slate-500">No users found.</td></tr>';
-        return;
-      }
-
-      tbody.innerHTML = users.map((user) =>
-        '<tr class="border-t border-white/5">' +
-          '<td class="whitespace-nowrap px-3 py-2.5 font-medium text-slate-200">' + esc(user.phone || '—') + '</td>' +
-          '<td class="whitespace-nowrap px-3 py-2.5">' +
-            (user.telegramPhone
-              ? '<span class="rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] font-semibold text-violet-300">' + esc(user.telegramPhone) + '</span>'
-              : '<span class="text-slate-600">—</span>') +
-          '</td>' +
-          '<td class="whitespace-nowrap px-3 py-2.5">' +
-            (user.waJid
-              ? '<span class="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">linked</span>'
-              : '<span class="text-slate-600">—</span>') +
-          '</td>' +
-          '<td class="whitespace-nowrap px-3 py-2.5 text-slate-300">' + Number(user.messages || 0) + '</td>' +
-          '<td class="whitespace-nowrap px-3 py-2.5 text-slate-400">' + esc(formatDate(user.updatedAt)) + '</td>' +
-        '</tr>'
-      ).join('');
+      return { close, root };
     }
 
-    async function loadLogs() {
-      try {
-        const data = await api('/logs');
-        const lines = Array.isArray(data.lines) ? data.lines : [];
-        $('logTail').textContent = lines.length ? lines.join('\n') : 'No logs yet.';
-      } catch (_) {
-        $('logTail').textContent = 'Logs unavailable.';
-      }
+    /* ============================== pages ================================= */
+    async function getConfig(force = false) {
+      if (!state.config || force) state.config = await api('/api/config');
+      return state.config;
     }
 
-    async function loadAll() {
-      await Promise.all([loadStatus(), loadSessions(), loadUsers(), loadLogs()]);
+    async function loadAgents() {
+      const data = await api('/api/agents');
+      state.agents = data.agents || [];
+      return state.agents;
     }
 
-    /* --------------------------------- Telegram -------------------------------- */
-
-    async function sendCode() {
-      const phone = $('phoneInput').value.trim();
-      if (!phone) return toast('Enter a phone number first', 'error');
-
-      const btn = $('sendCodeBtn');
-      btn.disabled = true;
-      btn.textContent = 'Sending…';
-      try {
-        const data = await api('/telegram/send-code', { method: 'POST', body: JSON.stringify({ phone }) });
-        if (!data.success) throw new Error(data.error || 'Telegram rejected the request');
-
-        state.phone = data.phone || phone;
-        state.phoneCodeHash = data.phoneCodeHash || '';
-        $('verifyPhone').textContent = state.phone;
-        $('verifyBox').classList.remove('hidden');
-        $('codeInput').value = '';
-        $('passwordInput').value = '';
-        $('codeInput').focus();
-        toast(data.message || 'Code sent to Telegram');
-        loadStatus();
-      } catch (err) {
-        toast(err.message, 'error');
-      } finally {
-        btn.disabled = false;
-        btn.textContent = 'Send Code';
-      }
+    async function loadCatalog(force = false) {
+      if (!force && state.catalog.free.length) return state.catalog;
+      const data = await api('/api/models' + (force ? '?refresh=1' : ''));
+      state.catalog = { free: data.free || [], paid: data.paid || [], source: data.source || 'unknown' };
+      return state.catalog;
     }
 
-    async function verifyCode() {
-      const code = $('codeInput').value.trim();
-      if (!code) return toast('Enter the login code', 'error');
-      if (!state.phone) return toast('Send a code first', 'error');
-
-      const password = $('passwordInput').value;
-      const btn = $('verifyBtn');
-      btn.disabled = true;
-      btn.textContent = 'Verifying…';
-      try {
-        const data = await api('/telegram/verify-code', {
-          method: 'POST',
-          body: JSON.stringify({
-            phone: state.phone,
-            code,
-            phoneCodeHash: state.phoneCodeHash,
-            password: password || undefined,
-          }),
-        });
-
-        if (data.needsPassword) {
-          toast('Two-factor password required — enter it and verify again', 'error');
-          $('passwordInput').focus();
-          return;
-        }
-        if (!data.success) throw new Error(data.error || 'Verification failed');
-
-        if (data.envValue) {
-          $('envBackupValue').value = data.envValue;
-          $('envBackupCount').textContent = 'updated just now';
-        }
-        toast('Logged in — session saved');
-        resetLogin();
-        await Promise.all([loadStatus(), loadSessions(), loadUsers()]);
-      } catch (err) {
-        toast(err.message, 'error');
-      } finally {
-        btn.disabled = false;
-        btn.textContent = 'Verify';
-      }
+    async function loadInstances() {
+      const data = await api('/api/instances');
+      state.instances = data.instances || [];
+      return data;
     }
 
-    function resetLogin() {
-      state.phone = '';
-      state.phoneCodeHash = '';
-      $('verifyBox').classList.add('hidden');
-      $('codeInput').value = '';
-      $('passwordInput').value = '';
-      $('phoneInput').value = '';
+    /* ------------------------------ dashboard ----------------------------- */
+    async function dashboardPage(el) {
+      const [config, instancesData] = await Promise.all([
+        getConfig(true),
+        loadInstances().catch(() => ({ instances: [] })),
+        loadCatalog().catch(() => null),
+      ]);
+      const instances = instancesData.instances || [];
+      const connected = instances.filter((i) => isInstanceConnected(i.status)).length;
+      const supabaseOk = config.supabase.configured;
+      const evolutionOk = config.evolution.configured;
+
+      const stat = (label, value, note, tone) =>
+        '<div class="' + cardCls + ' p-4"><p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">' + esc(label) + '</p>'
+        + '<p class="mt-1 text-2xl font-extrabold ' + (tone || '') + '">' + esc(value) + '</p>'
+        + (note ? '<p class="mt-1 text-xs text-slate-500 dark:text-slate-400">' + esc(note) + '</p>' : '') + '</div>';
+
+      el.innerHTML = '<div class="space-y-6">'
+        + (!supabaseOk
+          ? '<div class="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4"><p class="font-semibold text-amber-700 dark:text-amber-300">⚠️ Supabase not connected - optional</p><p class="mt-1 text-sm text-amber-700/90 dark:text-amber-200/90">Everything works now, but agents, inbox, groups and media are kept <b>in memory</b> and reset when the server restarts. Add <code class="rounded bg-amber-500/20 px-1">SUPABASE_URL</code> and <code class="rounded bg-amber-500/20 px-1">SUPABASE_KEY</code> in <code class="rounded bg-amber-500/20 px-1">.env</code> and run <code class="rounded bg-amber-500/20 px-1">supabase/schema.sql</code> to persist. Get a free project at <a href="https://supabase.com" target="_blank" rel="noopener" class="underline">supabase.com</a>.</p></div>'
+          : '')
+        + '<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">'
+        + '<div class="' + cardCls + ' p-4"><div class="flex items-start justify-between gap-2"><p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Supabase</p>' + optionalPill(supabaseOk) + '</div><p class="mt-3 text-sm font-semibold">Postgres + Storage (optional)</p><p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">' + (supabaseOk ? 'bucket: ' + esc(config.supabase.bucket) : 'in-memory · bucket unused') + '</p></div>'
+        + '<div class="' + cardCls + ' p-4"><div class="flex items-start justify-between gap-2"><p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Evolution API</p>' + statusPill(evolutionOk) + '</div><p class="mt-3 text-sm font-semibold">' + connected + ' / ' + instances.length + ' connected</p><p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">' + esc(config.evolution.url || 'EVOLUTION_API_URL missing') + '</p></div>'
+        + '<div class="' + cardCls + ' p-4"><div class="flex items-start justify-between gap-2"><p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">AI keys (BYOK)</p>' + statusPill(config.ai.groq || config.ai.openrouter) + '</div><p class="mt-3 text-sm font-semibold">Groq ' + (config.ai.groq ? '✓' : '—') + ' · OpenRouter ' + (config.ai.openrouter ? '✓' : 'optional') + '</p><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Voice TTS: ' + esc(config.ai.tts) + '</p></div>'
+        + '<div class="' + cardCls + ' border-amber-500/30 p-4"><div class="flex items-start justify-between gap-2"><p class="text-[11px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">Telegram</p><span class="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold uppercase text-amber-700 dark:text-amber-300">Soon</span></div><p class="mt-3 text-sm font-semibold text-amber-700 dark:text-amber-300">' + TELEGRAM + '</p><p class="mt-1 text-xs text-amber-600/80 dark:text-amber-200/70">Not part of this build</p></div>'
+        + '</div>'
+        + '<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">'
+        + stat('Agents', config.counts.agents, 'AI personas with models and media')
+        + stat('Chats', config.counts.chats, 'Conversations seen in the inbox')
+        + stat('Groups', config.counts.groups, 'Synced from Evolution')
+        + stat('Messages', config.counts.messages, config.supabase.configured ? 'Stored in Supabase' : 'Temporary in-memory messages')
+        + '</div>'
+        + '<div class="grid gap-4 lg:grid-cols-3">'
+        + '<div class="' + cardCls + ' p-5 lg:col-span-2"><h2 class="text-sm font-bold">Quick start</h2><div class="mt-4 grid gap-3 sm:grid-cols-2">'
+        + '<a href="/connect" data-link class="rounded-xl border border-slate-200 p-4 transition hover:border-emerald-500/50 hover:bg-emerald-500/5 dark:border-slate-800"><p class="text-sm font-semibold">1. Connect WhatsApp</p><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Create an instance and link it with a QR code or an 8-digit pairing code.</p></a>'
+        + '<a href="/agents" data-link class="rounded-xl border border-slate-200 p-4 transition hover:border-emerald-500/50 hover:bg-emerald-500/5 dark:border-slate-800"><p class="text-sm font-semibold">2. Create an agent</p><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Pick a free Groq or OpenRouter model and write its instructions.</p></a>'
+        + '<a href="/inbox" data-link class="rounded-xl border border-slate-200 p-4 transition hover:border-emerald-500/50 hover:bg-emerald-500/5 dark:border-slate-800"><p class="text-sm font-semibold">3. Reply from the inbox</p><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Assign an agent to a chat, or answer it yourself.</p></a>'
+        + '<a href="/groups" data-link class="rounded-xl border border-slate-200 p-4 transition hover:border-emerald-500/50 hover:bg-emerald-500/5 dark:border-slate-800"><p class="text-sm font-semibold">4. Host a group</p><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Sync groups and let an agent answer inside them.</p></a>'
+        + '</div></div>'
+        + '<div class="' + cardCls + ' p-5"><h2 class="text-sm font-bold">AI model catalog</h2><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">' + (config.modelsSource === 'live' ? 'Live from OpenRouter' : 'Built-in fallback list') + '</p>'
+        + '<div class="mt-4 space-y-2 text-sm"><div class="flex justify-between"><span class="text-slate-500 dark:text-slate-400">Free models</span><span class="font-semibold">' + state.catalog.free.length + '</span></div>'
+        + '<div class="flex justify-between"><span class="text-slate-500 dark:text-slate-400">Paid models</span><span class="font-semibold">' + state.catalog.paid.length + '</span></div>'
+        + '<div class="flex justify-between"><span class="text-slate-500 dark:text-slate-400">Voice replies</span><span class="font-semibold">' + (config.ai.groq ? 'ready' : 'needs Groq key') + '</span></div></div>'
+        + '<a href="/settings" data-link class="' + btnGhost + ' mt-5 w-full">Manage keys</a></div>'
+        + '</div>'
+        + '<div class="rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4 text-sm"><span class="font-semibold text-amber-700 dark:text-amber-300">' + TELEGRAM + '</span><span class="text-amber-700/80 dark:text-amber-200/70"> — Telegram MTProto is not included in this app. All Telegram endpoints return 410 Gone.</span></div>'
+        + '</div>';
+      return loadCatalog().catch(() => null);
     }
-
-    /* --------------------------------- WhatsApp -------------------------------- */
-
-    function qrSource(value) {
-      if (!value || typeof value !== 'string') return '';
-      return value.startsWith('data:') ? value : 'data:image/png;base64,' + value;
-    }
-
-    function extractQr(data) {
-      const evolution = data.evolution || {};
-      const qr = evolution.qrcode;
-      if (qr && typeof qr === 'object' && qr.base64) return qr.base64;
-      if (typeof qr === 'string') return qr;
-      return evolution.base64 || (evolution.data && evolution.data.qrcode && evolution.data.qrcode.base64) || '';
-    }
-
-    function showQr(base64, instance) {
-      const src = qrSource(base64);
-      if (!src) return;
-      $('qrImage').src = src;
-      $('qrImage').classList.remove('hidden');
-      $('qrCaption').textContent = 'Scan with WhatsApp → Linked devices (' + instance + ')';
-      $('qrWrap').classList.remove('hidden');
-    }
-
-    async function createInstance() {
-      const name = $('instanceName').value.trim();
-      if (!name) return toast('Enter an instance name', 'error');
-
-      const btn = $('createInstanceBtn');
-      btn.disabled = true;
-      btn.textContent = 'Creating…';
-      try {
-        const data = await api('/instance/create', {
-          method: 'POST',
-          body: JSON.stringify({ instanceName: name }),
-        });
-        toast('Instance ' + (data.instance || name) + ' created');
-        $('qrState').textContent = 'Waiting for QR code…';
-        $('qrWrap').classList.remove('hidden');
-        $('qrCaption').textContent = 'Scan with WhatsApp → Linked devices (' + name + ')';
-
-        const qr = extractQr(data);
-        if (qr) showQr(qr, name);
-        else $('qrImage').classList.add('hidden');
-
-        pollConnect(name, 0);
-        loadStatus();
-      } catch (err) {
-        toast(err.message, 'error');
-      } finally {
-        btn.disabled = false;
-        btn.textContent = 'Create';
-      }
-    }
-
-    async function pollConnect(name, attempt) {
-      if (attempt > 15) {
-        $('qrState').textContent = 'Stopped polling — refresh the instance list to check status.';
-        return;
-      }
-      try {
-        const data = await api('/instance/connect?instance=' + encodeURIComponent(name));
-        const current = String(data.state || '').toLowerCase();
-        if (data.base64) showQr(data.base64, name);
-        $('qrState').textContent = 'Status: ' + (data.state || 'connecting') + (attempt ? ' · check ' + attempt + '/15' : '');
-
-        if (current === 'open' || current === 'connected') {
-          $('qrState').textContent = '✅ Connected — QR no longer needed.';
-          $('qrImage').classList.add('hidden');
-          toast(name + ' is connected');
-          loadStatus();
-          return;
-        }
-      } catch (_) {
-        $('qrState').textContent = 'Waiting for Evolution API…';
-      }
-      setTimeout(() => pollConnect(name, attempt + 1), 4000);
-    }
-
-    /* ---------------------------------- wiring --------------------------------- */
-
-    $('refreshBtn').addEventListener('click', loadAll);
-    $('refreshSessionsBtn').addEventListener('click', loadSessions);
-
-    $('loginForm').addEventListener('submit', (event) => {
-      event.preventDefault();
-      sendCode();
-    });
-    $('verifyBtn').addEventListener('click', verifyCode);
-    $('resetLoginBtn').addEventListener('click', resetLogin);
-
-    $('instanceForm').addEventListener('submit', (event) => {
-      event.preventDefault();
-      createInstance();
-    });
-
-    $('userSearch').addEventListener('input', (event) => {
-      state.search = event.target.value;
-      renderUsers();
-    });
-
-    $('copyEnvBtn').addEventListener('click', async () => {
-      const value = $('envBackupValue').value.trim();
-      if (!value) return toast('No backup value yet — log in first', 'error');
-      try {
-        await navigator.clipboard.writeText(value);
-        toast('Copied TELEGRAM_SESSIONS_JSON value');
-      } catch (_) {
-        $('envBackupValue').select();
-        document.execCommand('copy');
-        toast('Copied TELEGRAM_SESSIONS_JSON value');
-      }
-    });
-
-    loadAll();
-  </script>
-</body>
-</html>
