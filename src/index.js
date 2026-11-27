@@ -860,7 +860,13 @@ async function handleWebhook(payload, urlInstance = '') {
       messages: buildMessages({ agent, history, userText: content }),
     });
 
-    let replyText = extractMediaRequest(result.text, agent.mediaFiles).text;
+    // The model can ask for one of the agent's uploaded files with [SEND_MEDIA: name].
+    // extractMediaRequest() returns the text with that marker stripped plus the file
+    // it picked; keep the file in requestedMedia so the send block below can use it.
+    const mediaRequest = extractMediaRequest(result.text, agent.mediaFiles);
+    let requestedMedia = mediaRequest.media || null;
+    if (typeof requestedMedia === 'undefined') requestedMedia = null;
+    let replyText = mediaRequest.text;
     // Voice notes are synthesised, so keep the text short for faster TTS.
     if (voiceWillBeSent) {
       replyText = replyText.slice(0, 500);
@@ -876,16 +882,21 @@ async function handleWebhook(payload, urlInstance = '') {
       || (replyMode === 'mirror' && !isIncomingAudio);
 
     if (requestedMedia && agent.mediaEnabled) {
-      const file = await agentMediaBuffer(requestedMedia);
-      await evo.sendMedia(sendInstance, target, {
-        media: file.buffer,
-        mediatype: mediaTypeFromMime(requestedMedia.type, requestedMedia.name),
-        mimetype: requestedMedia.type,
-        fileName: requestedMedia.name,
-        caption: replyText,
-        quoted,
-      });
-      console.log(`[webhook] replied to ${remoteJid} with media ${requestedMedia.name}`);
+      try {
+        const file = await agentMediaBuffer(requestedMedia);
+        await evo.sendMedia(sendInstance, target, {
+          media: file.buffer,
+          mediatype: mediaTypeFromMime(requestedMedia.type, requestedMedia.name),
+          mimetype: requestedMedia.type,
+          fileName: requestedMedia.name,
+          caption: replyText,
+          quoted,
+        });
+        console.log(`[webhook] replied to ${remoteJid} with media ${requestedMedia.name}`);
+      } catch (err) {
+        // A missing/unreadable file must not swallow the text reply.
+        console.warn(`[webhook] media send failed, replying with text: ${err.message}`);
+      }
     }
 
     // Apply reply mode: textOnly, voiceOnly, both, or mirror
@@ -939,10 +950,12 @@ async function handleWebhook(payload, urlInstance = '') {
       `[webhook] replied to ${remoteJid} via ${agent.name} (${result.model}) ${result.usage.totalTokens || '?'} tokens`,
     );
   } catch (err) {
+    // Log the real reason; never leak internal errors to the WhatsApp user.
     console.error(`[webhook] reply failed for ${remoteJid}: ${err.message}`);
-    await evo
-      .sendText(sendInstance, target, `⚠️ AI error: ${err.message}`.slice(0, 500), { quoted })
-      .catch(() => null);
+    const friendly = media
+      ? "Sorry, I couldn't process that image right now. Send text."
+      : "Sorry, I couldn't process that message right now. Please send it again as text.";
+    await evo.sendText(sendInstance, target, friendly, { quoted }).catch(() => null);
   } finally {
     clearInterval(presenceInterval);
     await evo.sendPresence(sendInstance, target, 'paused').catch(() => null);
