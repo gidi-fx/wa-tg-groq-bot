@@ -595,13 +595,16 @@ export async function getHistory(jid, limit = 20) {
 /** Group inbox rows into one conversation per JID. */
 function summarizeConversations(rows, assignedByJid, agentNamesById) {
   const conversations = new Map();
-  for (const row of rows || []) {
-    const key = row.key || row.remote_jid;
-    const parts = key.split('|');
-    const jid = parts?.[1] || row.remote_jid;
-    const instance = parts?.[0] || row.instance || null;
-    if (!jid) continue;
-    let conversation = conversations.get(instance);
+      for (const row of rows || []) {
+      // One conversation per chat, keyed by instance + jid. Keying by the instance
+      // alone collapsed every chat of an account into a single row, so a 256-chat
+      // inbox rendered as one conversation.
+      const parts = String(row.key || '').split('|');
+      const jid = row.remote_jid || parts[1] || (row.key && !row.key.includes('|') ? row.key : '');
+      if (!jid) continue;
+      const instance = row.instance || parts[0] || null;
+      const conversationKey = `${instance || ''}|${jid}`;
+      let conversation = conversations.get(conversationKey);
     if (!conversation) {
       conversation = {
         instance,
@@ -613,7 +616,7 @@ function summarizeConversations(rows, assignedByJid, agentNamesById) {
         unread: 0,
         count: 0,
       };
-      conversations.set(instance, conversation);
+      conversations.set(conversationKey, conversation);
     }
     conversation.count += 1;
     if (!row.is_from_me) conversation.unread += 1;
@@ -630,24 +633,29 @@ function summarizeConversations(rows, assignedByJid, agentNamesById) {
   });
 }
 
-export async function getConversations({ search = '', limit = 1000 } = {}) {
+export async function getConversations({ search = '', instance = '', limit = 1000 } = {}) {
   let rows;
   let assignedByJid;
   let agentNamesById;
 
   if (!hasSupabase) {
+    // Same in-memory store the dashboard counts from: without Supabase the
+    // inbox must never come back empty while /api/config reports messages.
     rows = [...mem.inbox]
+      .filter((row) => !instance || row.instance === instance)
       .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
       .slice(0, Math.min(Number(limit) || 1000, 3000));
     assignedByJid = mem.assignments;
     agentNamesById = new Map([...mem.agents.values()].map((agent) => [agent.id, agent.name]));
   } else {
     const db = requireSupabase();
-    const { data, error } = await db
+    let dbQuery = db
       .from('inbox_messages')
       .select('id,instance,remote_jid,push_name,message_type,content,media_url,timestamp,is_from_me')
       .order('timestamp', { ascending: false })
       .limit(Math.min(Number(limit) || 1000, 3000));
+    if (instance) dbQuery = dbQuery.eq('instance', instance);
+    const { data, error } = await dbQuery;
     if (error) throw dbError(error, 'Could not load inbox');
 
     const [assignmentsResult, agentsResult] = await Promise.all([
@@ -660,24 +668,25 @@ export async function getConversations({ search = '', limit = 1000 } = {}) {
   }
 
   const list = summarizeConversations(rows, assignedByJid, agentNamesById);
+  const scoped = instance ? list.filter((item) => item.instance === instance) : list;
 
   const query = String(search || '').trim().toLowerCase();
   const filtered = query
-    ? list.filter(
+    ? scoped.filter(
         (item) =>
           item.jid.toLowerCase().includes(query) ||
           String(item.pushName).toLowerCase().includes(query) ||
           String(item.lastMessage).toLowerCase().includes(query),
       )
-    : list;
+    : scoped;
 
   return filtered.slice(0, 300);
 }
 
-export async function getInboxMessages(jid, limit = 200) {
+export async function getInboxMessages(jid, limit = 200, instance = '') {
   if (!hasSupabase) {
     const rows = mem.inbox
-      .filter((row) => row.remote_jid === jid && row.key)
+      .filter((row) => row.remote_jid === jid && row.key && (!instance || row.instance === instance))
       .sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))
       .slice(0, Math.min(Number(limit) || 200, 500));
     if (rows.length) {
@@ -692,6 +701,10 @@ export async function getInboxMessages(jid, limit = 200) {
         instance: row.instance || null,
       }));
     }
+    // Chat history is not scoped to an instance, so a filtered request with no
+    // matching inbox rows is genuinely empty - do not leak history from another
+    // account into it.
+    if (instance) return [];
     const history = await getHistory(jid, 200);
     return history.map((row, index) => ({
       id: `history-${index}`,
@@ -706,12 +719,14 @@ export async function getInboxMessages(jid, limit = 200) {
   }
 
   const db = requireSupabase();
-  const { data, error } = await db
+  let dbQuery = db
     .from('inbox_messages')
     .select('id,instance,remote_jid,push_name,message_type,content,media_url,timestamp,is_from_me')
     .eq('remote_jid', jid)
     .order('timestamp', { ascending: true })
     .limit(Math.min(Number(limit) || 200, 500));
+  if (instance) dbQuery = dbQuery.eq('instance', instance);
+  const { data, error } = await dbQuery;
   if (error) throw dbError(error, 'Could not load messages');
 
   const messages = (data || []).map((row) => ({
@@ -726,6 +741,7 @@ export async function getInboxMessages(jid, limit = 200) {
   }));
 
   if (messages.length) return messages;
+  if (instance) return [];
 
   // Fall back to the AI memory if the inbox has no rows for this chat yet.
   const history = await getHistory(jid, 200);

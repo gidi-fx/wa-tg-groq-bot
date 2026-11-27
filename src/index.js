@@ -954,16 +954,18 @@ async function handleWebhook(payload, urlInstance = '') {
 app.get(
   '/api/inbox',
   asyncRoute(async (req, res) => {
+    // ?instance=wa-... scopes everything to that WhatsApp account.
+    const instance = String(req.query.instance || '').trim();
     if (!isSupabaseConfigured()) {
       return res.json({
         ok: true,
         hasSupabase: false,
         warning: MEMORY_WARNING,
-        data: memorySnapshot(),
+        data: memorySnapshot(instance),
       });
     }
     const [conversations, groups, agents] = await Promise.all([
-      getConversations({ search: req.query.search || '' }),
+      getConversations({ search: req.query.search || '', instance }),
       listGroups(),
       listAgents(),
     ]);
@@ -975,6 +977,7 @@ app.get(
         conversations,
         groups,
         agents,
+        instance: instance || null,
         counts: { agents: agents.length, groups: groups.length, conversations: conversations.length },
       },
     });
@@ -984,7 +987,10 @@ app.get(
 app.get(
   '/api/inbox/conversations',
   asyncRoute(async (req, res) => {
-    const conversations = await getConversations({ search: req.query.search || '' });
+    const conversations = await getConversations({
+      search: req.query.search || '',
+      instance: String(req.query.instance || '').trim(),
+    });
     res.json({ ok: true, conversations });
   }),
 );
@@ -994,7 +1000,7 @@ app.get(
   asyncRoute(async (req, res) => {
     const jid = String(req.query.jid || '').trim();
     if (!jid) throw new AppError('jid is required', 400, 'missing_jid');
-    const messages = await getInboxMessages(jid, req.query.limit || 200);
+    const messages = await getInboxMessages(jid, req.query.limit || 200, String(req.query.instance || '').trim());
     res.json({ ok: true, jid, messages });
   }),
 );

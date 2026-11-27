@@ -65,7 +65,7 @@
           : '<div class="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-xs text-amber-800 dark:text-amber-200"><p class="font-bold">Connect WhatsApp first in Connect page</p><p class="mt-1">No account with state <code>open</code> was found, so there is nowhere to send replies from.</p><a href="/connect" data-link class="' + btnPrimary + ' mt-3 !py-1.5 !text-xs">Go to Connect</a></div>';
 
         const body = '<form id="agent-form" class="space-y-4">'
-          + '<div><label class="' + labelCls + '" for="agent-name">Name</label><input id="agent-name" class="' + inputCls + '" required placeholder="Sales assistant" value="' + esc(agent?.name || '') + '" /></div>'
+          + '<div><label class="' + labelCls + '" for="agent-name">Name</label><input id="agent-name" type="text" inputmode="text" autocapitalize="sentences" autocomplete="off" style="pointer-events:auto" class="' + inputCls + '" required placeholder="Sales assistant" value="' + esc(agent?.name || '') + '" /></div>'
           + instanceField
           + '<div><label class="' + labelCls + '" for="agent-instruction">Instruction / system prompt</label><textarea id="agent-instruction" rows="4" class="' + inputCls + '" placeholder="You are a friendly support agent for ...">' + esc(agent?.instruction || '') + '</textarea></div>'
           + '<div class="rounded-xl border border-slate-200 p-4 dark:border-slate-800">'
@@ -97,6 +97,16 @@
 
         const modal = openModal({ title: editing ? 'Edit agent' : 'Create agent', body });
         const form = $('#agent-form', modal.root);
+
+        // Mobile: focus the name field explicitly and keep it tappable even when
+        // an overlay style disables pointer events on its container.
+        const nameInput = $('#agent-name', modal.root);
+        if (nameInput) {
+          nameInput.style.pointerEvents = 'auto';
+          requestAnimationFrame(() => {
+            try { nameInput.focus({ preventScroll: true }); } catch { nameInput.focus(); }
+          });
+        }
         const mediaSection = $('#media-section', form);
         const mediaList = $('#media-list', form);
         const listEl = $('#model-list', form);

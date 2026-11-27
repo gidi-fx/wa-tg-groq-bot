@@ -32,8 +32,8 @@
         + (note ? '<p class="mt-1 text-xs text-slate-500 dark:text-slate-400">' + esc(note) + '</p>' : '') + '</div>';
 
       el.innerHTML = '<div class="space-y-6">'
-        + (!supabaseOk
-          ? '<div class="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4"><p class="font-semibold text-amber-700 dark:text-amber-300">⚠️ Supabase not connected - optional</p><p class="mt-1 text-sm text-amber-700/90 dark:text-amber-200/90">Everything works now, but agents, inbox, groups and media are kept <b>in memory</b> and reset when the server restarts. Add <code class="rounded bg-amber-500/20 px-1">SUPABASE_URL</code> and <code class="rounded bg-amber-500/20 px-1">SUPABASE_KEY</code> in <code class="rounded bg-amber-500/20 px-1">.env</code> and run <code class="rounded bg-amber-500/20 px-1">supabase/schema.sql</code> to persist. Get a free project at <a href="https://supabase.com" target="_blank" rel="noopener" class="underline">supabase.com</a>.</p></div>'
+        + (!supabaseOk && !supabaseBannerHidden()
+          ? '<div id="page-supabase-banner" class="relative rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 pr-12"><button id="dismiss-supabase" class="absolute right-2 top-2 rounded-md px-2 py-1 text-amber-700/70 transition hover:bg-amber-500/20 hover:text-amber-800 dark:text-amber-200/70" aria-label="Dismiss Supabase notice">✕</button><p class="font-semibold text-amber-700 dark:text-amber-300">⚠️ Supabase not connected - optional</p><p class="mt-1 text-sm text-amber-700/90 dark:text-amber-200/90">Everything works now, but agents, inbox, groups and media are kept <b>in memory</b> and reset when the server restarts. Add <code class="rounded bg-amber-500/20 px-1">SUPABASE_URL</code> and <code class="rounded bg-amber-500/20 px-1">SUPABASE_KEY</code> in <code class="rounded bg-amber-500/20 px-1">.env</code> and run <code class="rounded bg-amber-500/20 px-1">supabase/schema.sql</code> to persist. Get a free project at <a href="https://supabase.com" target="_blank" rel="noopener" class="underline">supabase.com</a>.</p></div>'
           : '')
         + '<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">'
         + '<div class="' + cardCls + ' p-4"><div class="flex items-start justify-between gap-2"><p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Supabase</p>' + optionalPill(supabaseOk) + '</div><p class="mt-3 text-sm font-semibold">Postgres + Storage (optional)</p><p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">' + (supabaseOk ? 'bucket: ' + esc(bucket) : 'in-memory · bucket unused') + '</p></div>'
@@ -60,6 +60,16 @@
         + '<a href="/settings" data-link class="' + btnGhost + ' mt-5 w-full">Manage keys</a></div>'
         + '</div>'
         + '</div>';
+
+      const dismissBanner = $('#dismiss-supabase', el);
+      if (dismissBanner) {
+        dismissBanner.addEventListener('click', () => {
+          dismissSupabaseBanner();
+          const banner = $('#page-supabase-banner', el);
+          if (banner) banner.remove();
+        });
+      }
+
       return loadCatalog().catch(() => null);
     }
 
@@ -91,6 +101,9 @@
       let pairBusy = false;
       let pairCooldownUntil = 0;
       let pairCooldownTimer = null;
+      // Code currently on screen - the QR panel explains it instead of asking
+      // for the number again.
+      let lastPairCode = '';
       const CODE_COOLDOWN_MS = 60000;
       // Ones that were already open on load do not get a "Connected" toast again.
       const connectedNotified = new Set(instances.filter((item) => isInstanceConnected(item.status)).map((item) => item.name));
@@ -173,6 +186,50 @@
             ? '<p class="text-xs text-emerald-600 dark:text-emerald-400">Ready - messages are routed to your hosted agent.</p>'
             : '<p class="text-xs text-slate-500 dark:text-slate-400">Enter the pairing code on WhatsApp, then wait for “open”.</p>');
         setText(accountLabel, number || instance || '—');
+        paintQrHint(status);
+      }
+
+      /**
+       * The QR panel is the one place that used to keep saying "Enter your number
+       * above" after a pairing code was already issued. It now reflects the real
+       * state: connected, pairing code waiting, or nothing generated yet.
+       */
+      function paintQrHint(status) {
+        if (!qrContent) return;
+        if ($('img', qrContent)) return; // never wipe a QR that is on screen
+        const meta = connectStatusMeta(status);
+        if (meta.key === 'open') {
+          qrContent.innerHTML = '<div class="text-center"><p class="text-3xl">✅</p><p class="mt-2 text-sm font-bold text-emerald-600 dark:text-emerald-400">Connected as '
+            + esc(instanceNumber(instance) || instance) + '</p><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">No QR code needed - this number is already linked.</p></div>';
+          return;
+        }
+        if (lastPairCode) {
+          qrContent.innerHTML = '<div class="text-center"><p class="text-sm font-bold">Pairing code ready</p><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Copy the code above, then open WhatsApp → Linked devices → Link with phone number.</p><p class="mt-3 text-[11px] text-slate-500 dark:text-slate-400">Checking the connection every 3s…</p></div>';
+        }
+      }
+
+      /** Short two-tone chime when the account flips to open (no asset needed). */
+      function playConnectedChime() {
+        try {
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          if (!AudioCtx) return;
+          const ctx = new AudioCtx();
+          const gain = ctx.createGain();
+          gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.6);
+          gain.connect(ctx.destination);
+          [880, 1320].forEach((frequency, index) => {
+            const osc = ctx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.value = frequency;
+            osc.connect(gain);
+            const start = ctx.currentTime + index * 0.16;
+            osc.start(start);
+            osc.stop(start + 0.32);
+          });
+          setTimeout(() => ctx.close().catch(() => null), 1200);
+        } catch { /* audio blocked before a user gesture - the toast still shows it */ }
       }
 
       function renderInstances() {
@@ -190,9 +247,12 @@
             + '<div class="flex flex-wrap items-center gap-2">'
             + connectStatusBadge(item.status)
             + '<button data-select="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs">Select</button>'
+            // Connected numbers need Delete too: rotating a linked account is
+            // exactly what you do while it is open.
             + (meta.key === 'open'
               ? ''
-              : '<button data-reconnect="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs text-emerald-600 dark:text-emerald-400">Reconnect</button><button data-delete="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs text-rose-600 dark:text-rose-400">Delete</button>')
+              : '<button data-reconnect="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs text-emerald-600 dark:text-emerald-400">Reconnect</button>')
+            + '<button data-delete="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs text-rose-600 dark:text-rose-400">Delete</button>'
             + '</div></div>';
         }).join('');
 
@@ -209,7 +269,8 @@
         $$('[data-delete]', listEl).forEach((button) => {
           button.addEventListener('click', async () => {
             const name = button.dataset.delete;
-            if (!confirm('Delete instance ' + name + '?')) return;
+            const label = instanceNumber(name) || name;
+            if (!confirm('Delete ' + label + '? This will logout WhatsApp.')) return;
             button.disabled = true;
             try {
               await api('/api/instance/delete/' + encodeURIComponent(name), { method: 'DELETE' });
@@ -244,9 +305,11 @@
 
       function startPolling() {
         if (timer) return;
+        // 3s: a freshly approved pairing flips to open quickly, and the poller
+        // stops by itself as soon as Evolution reports open.
         timer = setInterval(() => {
           if (!document.hidden) syncFromEvolution();
-        }, 5000);
+        }, 3000);
       }
 
       function stopPolling() {
@@ -288,7 +351,17 @@
           stopPolling();
           if (!connectedNotified.has(instance)) {
             connectedNotified.add(instance);
-            toast('Connected');
+            playConnectedChime();
+            toast('Connected as ' + (instanceNumber(instance) || instance));
+            // Refresh the page data now that the account really is open, so
+            // Linked numbers and the QR panel stop looking stale.
+            const fresh = await api('/api/instances').catch(() => null);
+            if (fresh) {
+              instances = fresh.instances || instances;
+              state.instances = instances;
+              renderInstances();
+            }
+            renderStatus(status);
           }
         }
       }
@@ -321,6 +394,8 @@
       /** WhatsApp codes are 8 characters and may contain letters (e.g. 6DAQQ8N2). */
       function paintPairCode(code) {
         const raw = String(code || '').trim().toUpperCase();
+        lastPairCode = raw;
+        paintQrHint('connecting');
         const pretty = raw.length === 8 && /^\d{8}$/.test(raw) ? raw.replace(/(\d{4})(\d{4})/, '$1-$2') : raw;
         resultBox.innerHTML = '<div class="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-5 text-center"><p class="text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">Pairing code</p>'
           + '<p class="mt-3 select-all font-mono text-4xl font-extrabold tracking-[0.18em] text-emerald-700 dark:text-emerald-300 sm:text-5xl">' + esc(pretty) + '</p>'
@@ -428,7 +503,7 @@
       });
 
       await syncFromEvolution();
-      if (!isInstanceConnected(currentStatus())) startPolling();
+      startPolling();
 
       return () => {
         stopPolling();

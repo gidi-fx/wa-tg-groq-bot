@@ -201,12 +201,26 @@
       return '<span class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ' + cls + '"><span class="h-1.5 w-1.5 rounded-full ' + (ok ? 'bg-emerald-500' : 'bg-amber-500') + '"></span>' + (ok ? 'Configured' : 'In-memory (optional)') + '</span>';
     }
 
+    const SUPABASE_BANNER_KEY = 'supabaseBannerDismissed';
+
+    /** The Supabase notice is optional noise - once dismissed it stays gone. */
+    function supabaseBannerHidden() {
+      try { return localStorage.getItem(SUPABASE_BANNER_KEY) === '1'; } catch { return false; }
+    }
+
+    function dismissSupabaseBanner() {
+      try { localStorage.setItem(SUPABASE_BANNER_KEY, '1'); } catch { /* private mode - hides this session only */ }
+      paintPersistenceBanner();
+    }
+
     function paintPersistenceBanner() {
       const banner = $('#persistence-banner');
       if (!banner) return;
-      if (state.config && !supabaseReady(state.config)) {
-        banner.innerHTML = '<span>⚠️ Supabase not connected - <b>optional</b> - agents, inbox, groups, media will <b>NOT</b> be saved permanently. Add <code class="rounded bg-amber-500/20 px-1">SUPABASE_URL</code> + <code class="rounded bg-amber-500/20 px-1">SUPABASE_KEY</code> in <code class="rounded bg-amber-500/20 px-1">.env</code> to enable persistence. Get free at <a href="https://supabase.com" target="_blank" rel="noopener" class="underline">supabase.com</a></span>';
+      if (state.config && !supabaseReady(state.config) && !supabaseBannerHidden()) {
+        banner.innerHTML = '<div class="flex items-start gap-3"><span class="flex-1">⚠️ Supabase not connected - <b>optional</b> - agents, inbox, groups, media will <b>NOT</b> be saved permanently. Add <code class="rounded bg-amber-500/20 px-1">SUPABASE_URL</code> + <code class="rounded bg-amber-500/20 px-1">SUPABASE_KEY</code> in <code class="rounded bg-amber-500/20 px-1">.env</code> to enable persistence. Get free at <a href="https://supabase.com" target="_blank" rel="noopener" class="underline">supabase.com</a></span><button type="button" data-dismiss-supabase-banner class="flex-none rounded-md px-2 py-1 font-bold opacity-70 transition hover:bg-amber-500/20 hover:opacity-100" aria-label="Dismiss Supabase notice">✕</button></div>';
         banner.classList.remove('hidden');
+        const dismiss = $('[data-dismiss-supabase-banner]', banner);
+        if (dismiss) dismiss.addEventListener('click', dismissSupabaseBanner);
       } else {
         banner.classList.add('hidden');
         banner.innerHTML = '';

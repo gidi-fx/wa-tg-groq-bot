@@ -15,17 +15,19 @@ export const mem = {
 export const MEMORY_WARNING =
   'Inbox/Groups require Supabase for persistence, currently temporary';
 
-export function memoryCounts() {
+export function memoryCounts(instance = '') {
+  const rows = instance ? mem.inbox.filter((row) => row.instance === instance) : mem.inbox;
   return {
     agents: mem.agents.size,
-    chats: new Set(mem.inbox.map((message) => message.remote_jid).filter(Boolean)).size,
+    chats: new Set(rows.map((message) => message.remote_jid).filter(Boolean)).size,
     groups: mem.groups.length,
-    messages: mem.inbox.length,
+    messages: rows.length,
   };
 }
 
 /** JSON-safe snapshot of the temporary store (never exposes raw keys). */
-export function memorySnapshot() {
+export function memorySnapshot(instance = '') {
+  const rows = instance ? mem.inbox.filter((row) => row.instance === instance) : mem.inbox;
   return {
     agents: [...mem.agents.values()].map((row) => ({ ...row })),
     groups: mem.groups.map((group) => ({
@@ -34,8 +36,9 @@ export function memorySnapshot() {
     })),
     hosts: Object.fromEntries(mem.hosts),
     assignments: Object.fromEntries(mem.assignments),
-    inbox: mem.inbox.slice(-200),
-    counts: memoryCounts(),
+    inbox: rows.slice(-200),
+    instance: instance || null,
+    counts: memoryCounts(instance),
     temporary: true,
     note: 'Temporary in-memory data. Restarting the server clears it.',
   };

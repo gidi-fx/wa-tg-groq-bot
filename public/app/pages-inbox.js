@@ -13,11 +13,14 @@
       let searchTerm = '';
       let searchTimer = null;
       let activeTab = 'all';
+      // false until the first /api/inbox/conversations answer arrives: the list
+      // shows a skeleton, never "No conversations yet" while still loading.
+      let loaded = false;
 
       el.innerHTML = '<div class="grid gap-4 lg:grid-cols-[340px_1fr]">'
         + '<div class="' + cardCls + ' flex max-h-[78vh] min-h-[420px] flex-col overflow-hidden">'
         + '<div class="border-b border-slate-200 p-3 dark:border-slate-800"><div class="flex gap-2"><input id="inbox-search" class="' + inputCls + '" placeholder="Search chats…" /><button id="inbox-refresh" class="' + btnGhost + ' !px-2.5" title="Refresh">↻</button></div>'
-        + '<div class="mt-2 flex items-center justify-between"><p class="text-[11px] text-slate-500 dark:text-slate-400" id="inbox-count">—</p></div><div id="inbox-tabs" class="flex gap-1 border-b border-slate-200 px-3 py-2 dark:border-slate-800"><button class="rounded-md px-2.5 py-1 text-[11px] font-bold bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" data-tab="all">All</button><button class="rounded-md px-2.5 py-1 text-[11px] font-bold text-slate-500 dark:text-slate-400" data-tab="unread">Unread</button></div><div class="flex items-center gap-2"><select id="sync-instance" class="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold dark:border-slate-700 dark:bg-slate-950"></select><button id="inbox-sync" class="text-[11px] font-semibold text-emerald-600 hover:underline dark:text-emerald-400">Sync</button></div></div></div>'
+        + '<div class="mt-2 flex items-center justify-between"><p class="text-[11px] text-slate-500 dark:text-slate-400" id="inbox-count">—</p></div><div id="inbox-tabs" class="flex gap-1 border-b border-slate-200 px-3 py-2 dark:border-slate-800"><button class="rounded-md px-2.5 py-1 text-[11px] font-bold bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" data-tab="all">All</button><button class="rounded-md px-2.5 py-1 text-[11px] font-bold text-slate-500 dark:text-slate-400" data-tab="unread">Unread</button></div><div class="flex items-center gap-2"><select id="sync-instance" class="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold dark:border-slate-700 dark:bg-slate-950" disabled><option value="">Loading numbers…</option></select><button id="inbox-sync" class="text-[11px] font-semibold text-emerald-600 hover:underline dark:text-emerald-400">Sync</button></div></div></div>'
         + '<div id="chat-list" class="scroll-thin flex-1 overflow-y-auto"></div></div>'
         + '<div class="' + cardCls + ' flex max-h-[78vh] min-h-[420px] flex-col overflow-hidden">'
         + '<div id="thread-header" class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-800"><div class="min-w-0"><p class="truncate text-sm font-bold" id="thread-name">Select a chat</p><p class="truncate text-[11px] text-slate-500 dark:text-slate-400" id="thread-jid">Messages from Supabase inbox</p></div><div class="flex items-center gap-2"><select id="assign-agent" class="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs font-semibold dark:border-slate-700 dark:bg-slate-950"><option value="">No agent</option></select></div></div>'
@@ -30,19 +33,32 @@
       const assignEl = $('#assign-agent', el);
       const syncSelect = $('#sync-instance', el);
 
+      // Skeleton first, data second - the page never claims "not connected"
+      // before /api/instances has actually answered.
+      $('#inbox-count', el).textContent = 'Loading…';
+      listEl.innerHTML = spinner('Loading chats');
+
       function paintAgents() {
         assignEl.innerHTML = '<option value="">No agent</option>' + state.agents.map((agent) => '<option value="' + esc(agent.id) + '">' + esc(agent.name) + '</option>').join('');
       }
 
       async function loadInstanceOptions() {
-        const data = await loadInstances().catch(() => ({ instances: [] }));
+        syncSelect.disabled = true;
+        syncSelect.innerHTML = '<option value="">Loading numbers…</option>';
+        const data = await loadInstances().catch(() => ({ instances: state.instances || [] }));
         const list = data.instances || [];
         syncSelect.innerHTML = list.length
           ? list.map((item) => '<option value="' + esc(item.name) + '">' + esc(instanceNumber(item.name) ? 'Connected as ' + instanceNumber(item.name) : 'Linked WhatsApp') + '</option>').join('')
-          : '<option value="">not connected</option>';
+          : '<option value="">No WhatsApp connected</option>';
+        syncSelect.disabled = !list.length;
       }
 
       function paintConversations(filter = 'all') {
+        if (!loaded) {
+          $('#inbox-count', el).textContent = 'Loading…';
+          listEl.innerHTML = spinner('Loading chats');
+          return;
+        }
         // Filter conversations based on tab selection
         let conversations = state.inbox.conversations || [];
         if (filter === 'unread') {
@@ -101,6 +117,7 @@
           const query = searchTerm ? '?search=' + encodeURIComponent(searchTerm) : '';
           const data = await api('/api/inbox/conversations' + query);
           state.inbox.conversations = data.conversations || [];
+          loaded = true;
           paintConversations(activeTab);
           if (selected) {
             if (!silent) await paintThread();
@@ -110,6 +127,8 @@
             }
           }
         } catch (error) {
+          loaded = true;
+          paintConversations(activeTab);
           if (!silent) toast(error.message, 'error');
         }
       }
