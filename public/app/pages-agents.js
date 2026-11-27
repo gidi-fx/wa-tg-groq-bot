@@ -4,6 +4,23 @@
       let mediaFiles = [];
       let pollTimer = null;
 
+      // Orpheus voices exposed by Groq TTS (env GROQ_TTS_VOICE overrides the default).
+      // Declared at the top of the page scope: the create/edit form body uses it
+      // while it is being built, so declaring it lower down threw a TDZ error and
+      // the modal never opened.
+      const VOICES = [
+        { id: 'troy', label: 'Troy · English (US) · male, warm' },
+        { id: 'hannah', label: 'Hannah · English (US) · female, calm' },
+        { id: 'diana', label: 'Diana · English (US) · female, bright' },
+        { id: 'austin', label: 'Austin · English (US) · male, deep' },
+        { id: 'daniel', label: 'Daniel · English (US) · male, neutral' },
+        { id: 'autumn', label: 'Autumn · English (US) · female, soft' },
+        { id: 'leah', label: 'Leah · English (US) · female, lively' },
+        { id: 'lucas', label: 'Lucas · English (US) · male, young' },
+        { id: 'michael', label: 'Michael · English (US) · male, steady' },
+        { id: 'david', label: 'David · English (US) · male, mature' },
+      ];
+
       function connectedInstances() {
         return (state.instances || []).filter((item) => isInstanceConnected(item.status));
       }
@@ -45,11 +62,33 @@
           + '</div>'
           + '<div id="agent-list">' + renderList() + '</div></div>';
 
-        $('#create-agent', el).addEventListener('click', () => openAgentModal());
+        // Both "+ Create agent" (header) and "Create agent" (empty state) open the
+        // same modal. Bound to click *and* touchend: some mobile browsers swallow
+        // the synthesized click on buttons inside scrollable containers.
+        const openCreate = (event) => {
+          if (event) event.preventDefault();
+          console.log('OPEN MODAL CLICKED');
+          try {
+            openAgentModal();
+          } catch (error) {
+            console.error('[agents] could not open the create modal', error);
+            toast('Could not open the form: ' + error.message, 'error');
+          }
+        };
+        const createButton = $('#create-agent', el);
+        if (createButton) {
+          createButton.style.pointerEvents = 'auto';
+          createButton.addEventListener('click', openCreate);
+          createButton.addEventListener('touchend', openCreate);
+        }
         $$('[data-edit]', el).forEach((button) => button.addEventListener('click', () => openAgentModal(state.agents.find((a) => a.id === button.dataset.edit))));
         $$('[data-delete]', el).forEach((button) => button.addEventListener('click', () => deleteAgentById(button.dataset.delete)));
         const emptyButton = $('#empty-create', el);
-        if (emptyButton) emptyButton.addEventListener('click', () => openAgentModal());
+        if (emptyButton) {
+          emptyButton.style.pointerEvents = 'auto';
+          emptyButton.addEventListener('click', openCreate);
+          emptyButton.addEventListener('touchend', openCreate);
+        }
       }
 
       function openAgentModal(agent = null) {
@@ -96,6 +135,7 @@
           + '</form>';
 
         const modal = openModal({ title: editing ? 'Edit agent' : 'Create agent', body });
+        modal.root.style.pointerEvents = 'auto';
         const form = $('#agent-form', modal.root);
 
         // Mobile: focus the name field explicitly and keep it tappable even when
@@ -115,20 +155,6 @@
         const orPanel = $('#openrouter-panel', form);
         const stateEl = $('#model-test-state', form);
         const metaEl = $('#model-meta', form);
-
-        // Orpheus voices exposed by Groq TTS (env GROQ_TTS_VOICE overrides the default).
-        const VOICES = [
-          { id: 'troy', label: 'Troy · English (US) · male, warm' },
-          { id: 'hannah', label: 'Hannah · English (US) · female, calm' },
-          { id: 'diana', label: 'Diana · English (US) · female, bright' },
-          { id: 'austin', label: 'Austin · English (US) · male, deep' },
-          { id: 'daniel', label: 'Daniel · English (US) · male, neutral' },
-          { id: 'autumn', label: 'Autumn · English (US) · female, soft' },
-          { id: 'leah', label: 'Leah · English (US) · female, lively' },
-          { id: 'lucas', label: 'Lucas · English (US) · male, young' },
-          { id: 'michael', label: 'Michael · English (US) · male, steady' },
-          { id: 'david', label: 'David · English (US) · male, mature' },
-        ];
 
         // Groq is locked to exactly these 2 models - nothing else is offered.
         const GROQ_OPTIONS = [

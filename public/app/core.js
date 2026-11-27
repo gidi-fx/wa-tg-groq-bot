@@ -332,6 +332,8 @@
 
     function openModal({ title, body, width = 'max-w-2xl' }) {
       const root = $('#modal-root');
+      // Keep the modal tappable even if an ancestor style disables pointer events.
+      root.style.pointerEvents = 'auto';
       root.innerHTML = '<div class="fixed inset-0 z-50 overflow-y-auto bg-slate-950/70 p-4 backdrop-blur-sm" data-backdrop>'
         + '<div class="fade-in mx-auto my-6 w-full ' + width + ' rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900" role="dialog" aria-modal="true">'
         + '<div class="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 dark:border-slate-800"><h2 class="text-base font-bold">' + esc(title) + '</h2><button data-close class="rounded-lg px-2 py-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200" aria-label="Close">✕</button></div>'
