@@ -64,10 +64,45 @@
     }
 
     /* -------------------------------- connect ----------------------------- */
+    const CONNECT_INSTANCE_KEY = 'wa-router:selected-instance';
+
+    /** Evolution connection states mapped to the three labels the Connect page shows. */
+    function connectStatusMeta(status) {
+      const value = String(status || '').toLowerCase();
+      if (/open|connected/.test(value)) {
+        return { key: 'open', label: 'Connected', pill: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300', dot: 'bg-emerald-500' };
+      }
+      if (/connecting|qr|pair/.test(value)) {
+        return { key: 'connecting', label: 'Connecting', pill: 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300', dot: 'bg-amber-500' };
+      }
+      return { key: 'close', label: 'Not connected', pill: 'border-slate-300 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400', dot: 'bg-slate-400' };
+    }
+
+    function connectStatusBadge(status) {
+      const meta = connectStatusMeta(status);
+      return '<span class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide ' + meta.pill + '"><span class="h-1.5 w-1.5 rounded-full ' + meta.dot + '"></span>' + esc(meta.label) + '</span>';
+    }
+
     async function connectPage(el) {
-      await loadInstances();
-      let instance = state.instances[0]?.name || '';
+      const initial = await loadInstances();
+      let instances = initial.instances || [];
+      let instance = '';
       let timer = null;
+      let pairBusy = false;
+      let pairCooldownUntil = 0;
+      let pairCooldownTimer = null;
+      const CODE_COOLDOWN_MS = 60000;
+      // Ones that were already open on load do not get a "Connected" toast again.
+      const connectedNotified = new Set(instances.filter((item) => isInstanceConnected(item.status)).map((item) => item.name));
+
+      // The last selected instance survives a reload.
+      let stored = '';
+      try { stored = localStorage.getItem(CONNECT_INSTANCE_KEY) || ''; } catch { stored = ''; }
+      const preferred = instances.find((item) => item.name === stored)
+        || instances.find((item) => isInstanceConnected(item.status))
+        || instances[0]
+        || null;
+      instance = preferred ? preferred.name : '';
 
       el.innerHTML = '<div class="space-y-5">'
         + '<div class="' + cardCls + ' p-5"><h2 class="text-sm font-bold">Link your WhatsApp</h2>'
@@ -82,7 +117,7 @@
         + '<div id="status-box" class="mt-4 space-y-3 text-sm"><p class="text-slate-500 dark:text-slate-400">No WhatsApp linked yet.</p></div>'
         + '<div class="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-950"><p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Account</p><p id="selected-instance" class="mt-1 font-mono text-sm font-bold">—</p></div>'
         + '</div></div>'
-        + '<div class="' + cardCls + ' overflow-hidden"><div class="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4 dark:border-slate-800"><h2 class="text-sm font-bold">Linked numbers</h2><span class="text-xs text-slate-500 dark:text-slate-400" id="instance-count">' + state.instances.length + '</span></div><div id="instance-list" class="divide-y divide-slate-200 dark:divide-slate-800"></div></div>'
+        + '<div class="' + cardCls + ' overflow-hidden"><div class="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4 dark:border-slate-800"><h2 class="text-sm font-bold">Linked numbers</h2><span class="text-xs text-slate-500 dark:text-slate-400" id="instance-count">' + instances.length + '</span></div><div id="instance-list" class="divide-y divide-slate-200 dark:divide-slate-800"></div></div>'
         + '</div>';
 
       const phoneInput = $('#pair-phone', el);
@@ -90,6 +125,7 @@
       const statusBox = $('#status-box', el);
       const accountLabel = $('#selected-instance', el);
       const resultBox = $('#pair-result', el);
+      const listEl = $('#instance-list', el);
 
       function setText(node, value) {
         if (node) node.textContent = String(value);
@@ -104,101 +140,179 @@
         return phone.length >= 8 ? 'wa-' + phone : null;
       }
 
-      function renderStatus(status) {
-        const connected = isInstanceConnected(status);
-        const number = instanceNumber(instance);
-        $('#qr-status', el).innerHTML = statusPill(connected, 'Connected', connected ? '' : 'Waiting');
-        statusBox.innerHTML = '<div class="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-800"><div><p class="font-semibold">' + esc(number ? 'Connected as ' + number : 'No WhatsApp connected') + '</p><p class="text-xs text-slate-500 dark:text-slate-400">state: ' + esc(status || 'unknown') + '</p></div>'
-          + '<span class="h-2.5 w-2.5 rounded-full ' + (connected ? 'bg-emerald-500' : 'bg-amber-500') + '"></span></div>'
-          + (connected ? '<p class="text-xs text-emerald-600 dark:text-emerald-400">Ready — messages are routed to your hosted agent.</p>' : '<p class="text-xs text-slate-500 dark:text-slate-400">Enter the pairing code on WhatsApp, then wait for “open”.</p>');
-        setText(accountLabel, number ? 'Connected as ' + number : (instance ? 'Linked' : '—'));
+      function findInstance(name) {
+        return instances.find((item) => item.name === name) || null;
       }
 
-      async function refreshStatus() {
-        if (!instance) return;
+      function currentStatus() {
+        const found = findInstance(instance);
+        return found ? found.status : 'not_found';
+      }
+
+      function remember(name) {
+        instance = name || '';
         try {
-          const status = await api('/api/instance/status/' + encodeURIComponent(instance));
-          renderStatus(status.state);
-        } catch (error) {
-          $('#qr-status', el).innerHTML = statusPill(false, '', 'Error');
-          statusBox.innerHTML = '<p class="text-xs text-rose-500">' + esc(error.message) + '</p>';
-        }
+          if (instance) localStorage.setItem(CONNECT_INSTANCE_KEY, instance);
+          else localStorage.removeItem(CONNECT_INSTANCE_KEY);
+        } catch { /* storage disabled - the selection just will not survive reload */ }
+        const number = instanceNumber(instance);
+        if (number && phoneInput) phoneInput.value = number;
+        setText(accountLabel, number || instance || '—');
+      }
+
+      /** "Connected as X" only when Evolution really reports open. */
+      function renderStatus(status) {
+        const meta = connectStatusMeta(status);
+        const number = instanceNumber(instance);
+        $('#qr-status', el).innerHTML = connectStatusBadge(status);
+        statusBox.innerHTML = '<div class="flex items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 dark:border-slate-800"><div class="min-w-0"><p class="truncate font-semibold">'
+          + esc(meta.key === 'open' ? 'Connected as ' + (number || instance) : 'Not connected')
+          + '</p><p class="text-xs text-slate-500 dark:text-slate-400">state: ' + esc(status || 'unknown') + '</p></div>'
+          + '<span class="h-2.5 w-2.5 flex-none rounded-full ' + meta.dot + '"></span></div>'
+          + (meta.key === 'open'
+            ? '<p class="text-xs text-emerald-600 dark:text-emerald-400">Ready - messages are routed to your hosted agent.</p>'
+            : '<p class="text-xs text-slate-500 dark:text-slate-400">Enter the pairing code on WhatsApp, then wait for “open”.</p>');
+        setText(accountLabel, number || instance || '—');
       }
 
       function renderInstances() {
-        const list = $('#instance-list', el);
-        setText($('#instance-count', el), state.instances.length);
-        if (!state.instances.length) {
-          list.innerHTML = '<p class="px-5 py-8 text-center text-sm text-slate-500 dark:text-slate-400">No WhatsApp number linked yet. Enter your number above.</p>';
+        setText($('#instance-count', el), instances.length);
+        if (!instances.length) {
+          listEl.innerHTML = '<p class="px-5 py-8 text-center text-sm text-slate-500 dark:text-slate-400">No WhatsApp number linked yet. Enter your number above.</p>';
           return;
         }
-        list.innerHTML = state.instances.map((item) => {
-          const connected = isInstanceConnected(item.status);
-          const number = instanceNumber(item.name);
-          return '<div class="flex flex-col gap-2 px-5 py-3 sm:flex-row sm:items-center sm:justify-between">'
-            + '<div class="min-w-0"><p class="truncate text-sm font-semibold">' + esc(number ? 'Connected as ' + number : 'Linked WhatsApp') + '</p><p class="truncate text-xs text-slate-500 dark:text-slate-400">' + esc(item.profileName || '—') + '</p></div>'
+        listEl.innerHTML = instances.map((item) => {
+          const meta = connectStatusMeta(item.status);
+          const number = instanceNumber(item.name) || String(item.number || '').replace(/\D/g, '');
+          const active = item.name === instance;
+          return '<div class="flex flex-col gap-2 px-5 py-3 sm:flex-row sm:items-center sm:justify-between' + (active ? ' bg-emerald-500/5' : '') + '">'
+            + '<div class="min-w-0"><p class="truncate font-mono text-sm font-bold">' + esc(number || item.name) + '</p><p class="truncate text-[11px] text-slate-500 dark:text-slate-400">' + esc(item.profileName || 'No profile name') + '</p></div>'
             + '<div class="flex flex-wrap items-center gap-2">'
-            + '<span class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ' + (connected ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'border-slate-300 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400') + '">' + esc(item.status || 'unknown') + '</span>'
+            + connectStatusBadge(item.status)
             + '<button data-select="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs">Select</button>'
-            + (item.status === 'connecting' ? '<button data-reconnect="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs text-emerald-600 dark:text-emerald-400">Reconnect</button>' : '')
-            + '<button data-delete="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs text-rose-600 dark:text-rose-400">Delete</button>'
+            + (meta.key === 'open'
+              ? ''
+              : '<button data-reconnect="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs text-emerald-600 dark:text-emerald-400">Reconnect</button><button data-delete="' + esc(item.name) + '" class="' + btnGhost + ' !px-2.5 !py-1 !text-xs text-rose-600 dark:text-rose-400">Delete</button>')
             + '</div></div>';
         }).join('');
-        $$('[data-select]', list).forEach((button) => {
-          button.addEventListener('click', () => {
-            instance = button.dataset.select;
-            if (instanceNumber(instance)) phoneInput.value = instanceNumber(instance);
-            renderStatus('');
-            refreshStatus();
-            getQR();
+
+        $$('[data-select]', listEl).forEach((button) => {
+          button.addEventListener('click', async () => {
+            remember(button.dataset.select);
+            renderInstances();
+            renderStatus(currentStatus());
+            startPolling();
+            await syncFromEvolution();
           });
         });
-        $$('[data-delete]', list).forEach((button) => {
+
+        $$('[data-delete]', listEl).forEach((button) => {
           button.addEventListener('click', async () => {
-            const instanceName = button.dataset.delete;
-            if (!confirm('Delete instance ' + instanceName + '?')) return;
+            const name = button.dataset.delete;
+            if (!confirm('Delete instance ' + name + '?')) return;
+            button.disabled = true;
             try {
-              await api('/api/instance/delete/' + encodeURIComponent(instanceName), { method: 'DELETE' });
-              await loadInstances();
-              renderInstances();
-              refreshStatus();
+              await api('/api/instance/delete/' + encodeURIComponent(name), { method: 'DELETE' });
+              connectedNotified.delete(name);
+              if (instance === name) remember('');
               toast('Instance deleted');
-            } catch (error) { toast(error.message, 'error'); }
+              await syncFromEvolution();
+              startPolling();
+            } catch (error) {
+              toast(error.message, 'error');
+              button.disabled = false;
+            }
           });
         });
-        $$('[data-reconnect]', list).forEach((button) => {
+
+        $$('[data-reconnect]', listEl).forEach((button) => {
           button.addEventListener('click', async () => {
-            const instanceName = button.dataset.reconnect;
-            if (!confirm('Reconnect instance ' + instanceName + '?')) return;
+            const name = button.dataset.reconnect;
+            button.disabled = true;
             try {
-              await api('/api/instance/reconnect/' + encodeURIComponent(instanceName), { method: 'POST' });
-              await loadInstances();
-              renderInstances();
-              refreshStatus();
+              await api('/api/instance/reconnect/' + encodeURIComponent(name), { method: 'POST' });
               toast('Reconnecting…');
-            } catch (error) { toast(error.message, 'error'); }
+              startPolling();
+              await syncFromEvolution();
+            } catch (error) {
+              toast(error.message, 'error');
+              button.disabled = false;
+            }
           });
         });
+      }
+
+      function startPolling() {
+        if (timer) return;
+        timer = setInterval(() => {
+          if (!document.hidden) syncFromEvolution();
+        }, 5000);
+      }
+
+      function stopPolling() {
+        if (!timer) return;
+        clearInterval(timer);
+        timer = null;
+      }
+
+      /** Real state from Evolution: GET /instance/fetchInstances + connectionState. */
+      async function syncFromEvolution() {
+        try {
+          const data = await api('/api/instances');
+          instances = data.instances || [];
+          state.instances = instances;
+        } catch (error) {
+          console.error('[connect] /api/instances failed', error);
+          return;
+        }
+        if (!instance && instances.length) remember(instances[0].name);
+        renderInstances();
+
+        let status = currentStatus();
+        if (instance && !isInstanceConnected(status)) {
+          try {
+            const live = await api('/api/instance/status/' + encodeURIComponent(instance));
+            if (live && live.state) {
+              status = live.state;
+              const found = findInstance(instance);
+              if (found) found.status = live.state;
+              renderInstances();
+            }
+          } catch (error) {
+            console.warn('[connect] status check failed:', error.message);
+          }
+        }
+        renderStatus(status);
+
+        if (instance && isInstanceConnected(status)) {
+          stopPolling();
+          if (!connectedNotified.has(instance)) {
+            connectedNotified.add(instance);
+            toast('Connected');
+          }
+        }
       }
 
       async function getQR() {
         const target = instanceFromPhone() || instance;
         if (!target) return toast('Enter your WhatsApp number first', 'info');
-        instance = target;
+        remember(target);
+        renderInstances();
         qrContent.innerHTML = spinner('Generating QR');
         try {
           const number = instanceNumber(instance) || phoneDigits();
           const result = await api('/api/instance/connect/' + encodeURIComponent(instance) + (number ? '?number=' + encodeURIComponent(number) : ''));
           const raw = result.base64 || '';
           if (!raw) {
-            qrContent.innerHTML = '<div class="text-sm text-slate-500 dark:text-slate-400">No QR yet. If the number is already linked, status will show <b>open</b>.<br /><button id="retry-qr" class="mt-3 text-emerald-600 underline dark:text-emerald-400">Try again</button></div>';
+            qrContent.innerHTML = '<div class="text-sm text-slate-500 dark:text-slate-400">No QR yet. If the number is already linked, status will show <b>Connected</b>.<br /><button id="retry-qr" class="mt-3 text-emerald-600 underline dark:text-emerald-400">Try again</button></div>';
             const retry = $('#retry-qr', qrContent);
             if (retry) retry.addEventListener('click', getQR);
-            return;
+          } else {
+            const src = raw.startsWith('data:') ? raw : 'data:image/png;base64,' + raw;
+            qrContent.innerHTML = '<div class="text-center"><img src="' + src + '" alt="WhatsApp QR code" class="mx-auto h-56 w-56 rounded-lg bg-white p-2" /><p class="mt-3 text-xs text-slate-500 dark:text-slate-400">WhatsApp → Linked devices → Link a device</p></div>';
           }
-          const src = raw.startsWith('data:') ? raw : 'data:image/png;base64,' + raw;
-          qrContent.innerHTML = '<div class="text-center"><img src="' + src + '" alt="WhatsApp QR code" class="mx-auto h-56 w-56 rounded-lg bg-white p-2" /><p class="mt-3 text-xs text-slate-500 dark:text-slate-400">WhatsApp → Linked devices → Link a device</p></div>';
-          refreshStatus();
+          startPolling();
+          await syncFromEvolution();
         } catch (error) {
           qrContent.innerHTML = '<div class="text-sm text-rose-500">' + esc(error.message) + '</div>';
         }
@@ -208,15 +322,25 @@
       function paintPairCode(code) {
         const raw = String(code || '').trim().toUpperCase();
         const pretty = raw.length === 8 && /^\d{8}$/.test(raw) ? raw.replace(/(\d{4})(\d{4})/, '$1-$2') : raw;
-        resultBox.innerHTML = '<div class="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center"><p class="text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">Pairing code</p><p class="mt-2 font-mono text-4xl font-extrabold tracking-[0.2em] text-emerald-700 dark:text-emerald-300">' + esc(pretty) + '</p><p class="mt-2 text-xs text-slate-600 dark:text-slate-300">WhatsApp → Linked devices → Link with phone number</p></div>';
+        resultBox.innerHTML = '<div class="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-5 text-center"><p class="text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">Pairing code</p>'
+          + '<p class="mt-3 select-all font-mono text-4xl font-extrabold tracking-[0.18em] text-emerald-700 dark:text-emerald-300 sm:text-5xl">' + esc(pretty) + '</p>'
+          + '<button id="copy-code" class="' + btnGhost + ' mt-4 !py-1.5 !text-xs">Copy code</button>'
+          + '<p class="mt-3 text-xs text-slate-600 dark:text-slate-300">WhatsApp → Linked devices → Link with phone number</p></div>';
+        const copy = $('#copy-code', resultBox);
+        if (copy) {
+          copy.addEventListener('click', async () => {
+            try {
+              await navigator.clipboard.writeText(raw);
+              toast('Pairing code copied');
+            } catch {
+              toast('Copy failed - select the code and copy it', 'error');
+            }
+          });
+        }
       }
 
-      // One connect call per press: a second call invalidates the first code, so the
-      // buttons stay disabled while the request runs and for 60s afterwards.
-      let pairBusy = false;
-      let pairCooldownUntil = 0;
-      let pairCooldownTimer = null;
-      const CODE_COOLDOWN_MS = 60000;
+      // One pairing request at a time. A second connect call invalidates the first
+      // code, so the buttons stay locked for 60s after a successful request only.
       const idleCodeLabels = { 'get-code': 'Get pairing code', 'retry-code': 'Try Pairing Code Again' };
 
       function paintCodeButtons() {
@@ -254,13 +378,17 @@
         pairBusy = true;
         paintCodeButtons();
         resultBox.innerHTML = spinner('Requesting pairing code');
+        let failed = false;
         try {
-          // GET /api/instance/connect/<instance>?number=<digits> → Evolution GET /instance/connect
-          const result = await api(
-            '/api/instance/connect/' + encodeURIComponent(target) + '?number=' + encodeURIComponent(phone),
-            { timeoutMs: 90000 },
-          );
-          if (result.instance) instance = result.instance;
+          // Server-side ladder: reset a closed instance, create it with the number,
+          // then read the code from create (or one connect call, then the QR).
+          const result = await api('/api/instance/pair/' + encodeURIComponent(target), {
+            method: 'POST',
+            body: { number: phone },
+            timeoutMs: 150000,
+          });
+          remember(result.instance || target);
+          renderInstances();
           const code = result.pairingCode ? String(result.pairingCode) : '';
           if (code) {
             paintPairCode(code);
@@ -268,39 +396,42 @@
             const raw = String(result.qr || result.base64 || '');
             if (raw) {
               const src = raw.startsWith('data:') ? raw : 'data:image/png;base64,' + raw;
-              resultBox.innerHTML = '<div class="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-center"><p class="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">No pairing code in Evolution\'s response — scan this QR instead</p><img src="' + src + '" alt="WhatsApp QR code" class="mx-auto mt-3 h-48 w-48 rounded-lg bg-white p-2" /></div>';
+              resultBox.innerHTML = '<div class="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-center"><p class="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">No pairing code from Evolution - scan this QR instead</p><img src="' + src + '" alt="WhatsApp QR code" class="mx-auto mt-3 h-48 w-48 rounded-lg bg-white p-2" /></div>';
             } else {
-              resultBox.innerHTML = '<p class="text-sm text-amber-600 dark:text-amber-400">Evolution returned neither a pairing code nor a QR. Wait a minute, then press <b>Try Pairing Code Again</b>.</p>';
+              resultBox.innerHTML = '<p class="text-sm text-amber-600 dark:text-amber-400">Evolution returned neither a pairing code nor a QR. Its raw response is in the server log, so try again in a moment.</p>';
             }
           }
-          await loadInstances();
-          renderInstances();
-          refreshStatus();
+          startPolling();
+          await syncFromEvolution();
         } catch (error) {
+          failed = true;
           resultBox.innerHTML = '<p class="text-sm text-rose-500">' + esc(error.message) + '</p>';
         } finally {
           pairBusy = false;
-          startCodeCooldown();
+          // No cooldown when the call itself failed: the user can retry immediately.
+          if (failed) paintCodeButtons();
+          else startCodeCooldown();
         }
       }
 
+      remember(instance);
       renderInstances();
-      renderStatus('');
+      renderStatus(currentStatus());
       paintCodeButtons();
-      if (instance) refreshStatus();
 
       $('#get-qr', el).addEventListener('click', getQR);
       $('#get-code', el).addEventListener('click', getCode);
       $('#retry-code', el).addEventListener('click', getCode);
-      $('#refresh-status', el).addEventListener('click', refreshStatus);
+      $('#refresh-status', el).addEventListener('click', async () => {
+        startPolling();
+        await syncFromEvolution();
+      });
 
-      timer = setInterval(() => {
-        if (document.hidden) return;
-        if (instance) refreshStatus();
-      }, 5000);
+      await syncFromEvolution();
+      if (!isInstanceConnected(currentStatus())) startPolling();
 
       return () => {
-        clearInterval(timer);
+        stopPolling();
         clearInterval(pairCooldownTimer);
       };
     }

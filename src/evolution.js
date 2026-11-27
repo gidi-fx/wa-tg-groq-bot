@@ -94,16 +94,16 @@ export async function fetchInstances() {
   return list.map(normalizeInstance).filter((item) => item.name !== 'unknown');
 }
 
-export async function createInstance(instanceName, webhookUrl) {
+export async function createInstance(instanceName, webhookUrl, { number } = {}) {
   const name = String(instanceName || '').trim();
   if (!name) throw new AppError('Instance name is required', 400, 'invalid_instance');
 
-  const data = await call(
-    'POST',
-    '/instance/create',
-    { instanceName: name, qrcode: true, integration: 'WHATSAPP-BAILEYS' },
-    45000,
-  );
+  const digitsOnly = number ? String(number).replace(/\D/g, '') : (instanceNumber(name) || '');
+  const body = { instanceName: name, qrcode: true, integration: 'WHATSAPP-BAILEYS' };
+  // Passing the number makes Evolution return a pairing code on create.
+  if (digitsOnly) body.number = digitsOnly;
+
+  const data = await call('POST', '/instance/create', body, 45000);
 
   let webhook = { ok: false, url: webhookUrl || null, error: null };
   if (webhookUrl) {
@@ -179,8 +179,8 @@ export async function connectInstance(instance, number) {
   // Raw response for debugging. safeLog redacts any credential-looking field.
   console.log('[evolution] connect raw response:', safeLog(data));
 
-  const pairingCode = data?.pairingCode ? String(data.pairingCode).trim() : null;
-  const qrBase64 = data?.base64 ? String(data.base64) : null;
+  const pairingCode = extractPairingCode(data);
+  const qrBase64 = extractQrBase64(data);
 
   return {
     instance,
@@ -190,7 +190,159 @@ export async function connectInstance(instance, number) {
     qr: pairingCode ? null : qrBase64, // QR fallback only when no pairing code
     base64: qrBase64, // kept for the QR panel
     count: data?.count ?? null,
+    raw: data, // debugging only, always logged through safeLog()
   };
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+/** Evolution returns the pairing code at the top level or nested under qrcode. */
+export function extractPairingCode(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  return firstString(
+    payload.pairingCode,
+    payload.qrcode?.pairingCode,
+    payload.data?.pairingCode,
+    payload.data?.qrcode?.pairingCode,
+    payload.instance?.pairingCode,
+    payload.instance?.qrcode?.pairingCode,
+  );
+}
+
+/** QR image data, at the top level or nested under qrcode/data. */
+export function extractQrBase64(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  return firstString(
+    payload.base64,
+    payload.qrcode?.base64,
+    payload.data?.base64,
+    payload.data?.qrcode?.base64,
+    payload.instance?.qrcode?.base64,
+  );
+}
+
+function pairResult(instance, number, state, extra = {}) {
+  const pairingCode = extra.pairingCode || null;
+  const base64 = extra.base64 || null;
+  return {
+    instance,
+    number,
+    state: state || 'unknown',
+    connected: /open|connected/i.test(String(state || '')),
+    pairingCode,
+    base64,
+    qr: pairingCode ? null : base64,
+    steps: extra.steps || [],
+  };
+}
+
+/**
+ * Pairing ladder used by "Get pairing code".
+ *
+ *  1. an instance that is already open is returned as-is;
+ *  2. a connecting instance gets exactly one connect call, which is the only
+ *     place Evolution exposes a pairing code;
+ *  3. a closed / missing instance (or a connect call without a code) is reset:
+ *     DELETE /instance/delete/:instance, 3s wait, POST /instance/create with the
+ *     number. The code is read from create (top level or qrcode.pairingCode);
+ *  4. if create returned no code, wait 2s and call GET /instance/connect once;
+ *  5. still no code: the raw response is logged (credentials redacted) and the QR
+ *     is returned as a fallback.
+ *
+ * The apikey is never logged: every payload goes through safeLog().
+ */
+export async function pairInstance(instance, number, webhookUrl) {
+  const name = String(instance || '').trim();
+  if (!name) throw new AppError('Instance name is required', 400, 'invalid_instance');
+  const digitsOnly = number ? String(number).replace(/\D/g, '') : (instanceNumber(name) || '');
+  const steps = [];
+  let lastPayload = null;
+  let state = 'unknown';
+
+  try {
+    const status = await getInstanceStatus(name);
+    state = String(status.state || 'unknown');
+    steps.push('status=' + state);
+  } catch (err) {
+    steps.push('status failed: ' + err.message);
+  }
+
+  if (/open|connected/i.test(state)) {
+    return pairResult(name, digitsOnly, 'open', { steps });
+  }
+
+  // Only reuse a live instance. close / not_found always go through the reset below.
+  const reusable = Boolean(state) && !/close|not_found|unknown|^$/i.test(state);
+  if (reusable) {
+    try {
+      const connected = await connectInstance(name, digitsOnly);
+      lastPayload = connected.raw || lastPayload;
+      if (connected.state) state = String(connected.state);
+      if (connected.pairingCode) {
+        steps.push('connect');
+        return pairResult(name, digitsOnly, state, {
+          pairingCode: connected.pairingCode,
+          base64: connected.base64,
+          steps,
+        });
+      }
+      steps.push('connect without code');
+    } catch (err) {
+      steps.push('connect failed: ' + err.message);
+    }
+  }
+
+  // Reset: delete, wait, create with the number.
+  try {
+    await deleteInstance(name);
+    steps.push('deleted');
+  } catch (err) {
+    // A 404 just means the instance was already gone; that is not fatal here.
+    steps.push('delete skipped: ' + err.message);
+  }
+
+  await sleep(3000);
+
+  let createdPayload = null;
+  try {
+    const created = await createInstance(name, webhookUrl, { number: digitsOnly });
+    createdPayload = created.evolution || null;
+    lastPayload = createdPayload || lastPayload;
+    steps.push('created');
+  } catch (err) {
+    steps.push('create failed: ' + err.message);
+  }
+
+  let pairingCode = extractPairingCode(createdPayload);
+  let base64 = extractQrBase64(createdPayload);
+
+  if (!pairingCode) {
+    await sleep(2000);
+    try {
+      const connected = await connectInstance(name, digitsOnly);
+      lastPayload = connected.raw || lastPayload;
+      if (connected.state) state = String(connected.state);
+      pairingCode = connected.pairingCode || null;
+      base64 = base64 || connected.base64 || null;
+      steps.push('connect retry');
+    } catch (err) {
+      steps.push('connect retry failed: ' + err.message);
+    }
+  }
+
+  if (!pairingCode) {
+    // Raw response for debugging. safeLog() strips the apikey and any token.
+    console.log('[evolution] pair returned no pairing code, raw response:', safeLog(lastPayload));
+  }
+
+  return pairResult(name, digitsOnly, state, { pairingCode, base64, steps });
 }
 
 export async function getInstanceStatus(instance) {

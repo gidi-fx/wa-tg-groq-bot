@@ -496,7 +496,7 @@ const createInstanceHandler = asyncRoute(async (req, res) => {
   const name = rawName || (number ? evo.instanceNameForNumber(number) : '');
   if (!name) throw new AppError('A WhatsApp number is required', 400, 'invalid_number');
   const webhookUrl = `${baseUrl(req)}/webhook/${encodeURIComponent(name)}`;
-  const result = await evo.createInstance(name, webhookUrl);
+  const result = await evo.createInstance(name, webhookUrl, { number });
   console.log(`[connect] instance ${name} created (webhook=${webhookUrl})`);
   res.status(201).json({ ok: true, ...result });
 });
@@ -541,6 +541,33 @@ app.post('/api/instance/connect/:instance', connectInstanceHandler);
 app.get('/api/instance/connect/:instance', connectInstanceHandler);
 app.post('/instance/connect/:instance', connectInstanceHandler);
 app.get('/instance/connect/:instance', connectInstanceHandler);
+
+/**
+ * Pairing ladder used by "Get pairing code": a closed (or codeless) instance is
+ * deleted, re-created with the number, and the code is read from the create
+ * response or one connect call. The QR is returned as a fallback.
+ */
+const pairInstanceHandler = asyncRoute(async (req, res) => {
+  const number = digits(req.body?.number || req.query.number || '');
+  const instance = req.params.instance
+    ? String(req.params.instance).trim()
+    : (number ? evo.instanceNameForNumber(number) : '');
+  if (!instance) throw new AppError('A WhatsApp number is required', 400, 'invalid_number');
+
+  const webhookUrl = `${baseUrl(req)}/webhook/${encodeURIComponent(instance)}`;
+  const result = await evo.pairInstance(instance, number, webhookUrl);
+
+  console.log(
+    `[connect] pair ${instance}: state=${result.state} pairingCode=${result.pairingCode ? 'yes' : 'no'} qr=${result.qr ? 'yes' : 'no'} steps=${result.steps.join(' > ') || 'none'}`,
+  );
+
+  res.json({ ok: true, ...result });
+});
+
+app.post('/api/instance/pair', pairInstanceHandler);
+app.get('/api/instance/pair', pairInstanceHandler);
+app.post('/api/instance/pair/:instance', pairInstanceHandler);
+app.get('/api/instance/pair/:instance', pairInstanceHandler);
 
 /** Latest QR data pushed by the Evolution webhook for an instance (never a pairing code). */
 app.get(
