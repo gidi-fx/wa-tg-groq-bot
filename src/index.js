@@ -88,12 +88,51 @@ const upload = multer({
  */
 const LATEST_QR = new Map();
 
+/**
+ * WhatsApp message ids already handled, keyed by "<instance>:<data.key.id>".
+ * Evolution can deliver the same event more than once (two webhook URLs, retries),
+ * and a duplicate must never be stored or answered twice.
+ */
+const SEEN_MESSAGES = new Map();
+const SEEN_MESSAGE_TTL_MS = 10 * 60 * 1000;
+const SEEN_MESSAGE_LIMIT = 5000;
+
 /* -------------------------------- helpers --------------------------------- */
 
 function baseUrl(req) {
   const configured = String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').trim();
   if (configured) return configured.replace(/\/+$/, '');
   return `${req.protocol}://${req.get('host')}`;
+}
+
+/**
+ * The ONE webhook endpoint configured in Evolution for every instance.
+ * The account is resolved from payload.instance, never from the URL.
+ */
+function webhookUrl(req) {
+  return `${baseUrl(req)}/webhook`;
+}
+
+/** True when this message id was already handled for this instance. */
+function alreadyHandled(instance, messageId) {
+  if (!messageId) return false;
+  const now = Date.now();
+  for (const [key, at] of SEEN_MESSAGES) {
+    if (now - at > SEEN_MESSAGE_TTL_MS) SEEN_MESSAGES.delete(key);
+  }
+  if (SEEN_MESSAGES.size > SEEN_MESSAGE_LIMIT) SEEN_MESSAGES.clear();
+  const key = `${instance}:${messageId}`;
+  if (SEEN_MESSAGES.has(key)) return true;
+  SEEN_MESSAGES.set(key, now);
+  return false;
+}
+
+function requireNumber(value) {
+  const digitsOnly = digits(value);
+  if (digitsOnly.length < 8) {
+    throw new AppError('A WhatsApp number with country code is required', 400, 'invalid_number');
+  }
+  return digitsOnly;
 }
 
 function digits(value) {
@@ -492,12 +531,13 @@ app.get(
 
 const createInstanceHandler = asyncRoute(async (req, res) => {
   const rawName = String(req.body?.instanceName || req.body?.name || '').trim();
-  const number = req.body?.number ? digits(req.body.number) : '';
-  const name = rawName || (number ? evo.instanceNameForNumber(number) : '');
-  if (!name) throw new AppError('A WhatsApp number is required', 400, 'invalid_number');
-  const webhookUrl = `${baseUrl(req)}/webhook/${encodeURIComponent(name)}`;
-  const result = await evo.createInstance(name, webhookUrl, { number });
-  console.log(`[connect] instance ${name} created (webhook=${webhookUrl})`);
+  // Never create an instance without its number: Evolution only returns a pairing
+  // code when `number` is present in the create body.
+  const number = requireNumber(req.body?.number);
+  const name = rawName || evo.instanceNameForNumber(number);
+  const hook = webhookUrl(req);
+  const result = await evo.createInstance(name, hook, { number });
+  console.log(`[connect] instance ${name} created (webhook=${hook})`);
   res.status(201).json({ ok: true, ...result });
 });
 
@@ -509,8 +549,8 @@ const connectInstanceHandler = asyncRoute(async (req, res) => {
     : (number ? evo.instanceNameForNumber(number) : '');
   if (!instance) throw new AppError('A WhatsApp number is required', 400, 'invalid_number');
 
-  const webhookUrl = `${baseUrl(req)}/webhook/${encodeURIComponent(instance)}`;
-  const ensured = await evo.ensureInstance(instance, webhookUrl);
+  const hook = webhookUrl(req);
+  const ensured = await evo.ensureInstance(instance, hook, { number });
   // One connect call only. The pairing code comes from this response and nowhere else;
   // the qrcode.updated webhook never carries it, and a second call invalidates the code.
   const data = await evo.connectInstance(instance, number);
@@ -554,8 +594,10 @@ const pairInstanceHandler = asyncRoute(async (req, res) => {
     : (number ? evo.instanceNameForNumber(number) : '');
   if (!instance) throw new AppError('A WhatsApp number is required', 400, 'invalid_number');
 
-  const webhookUrl = `${baseUrl(req)}/webhook/${encodeURIComponent(instance)}`;
-  const result = await evo.pairInstance(instance, number, webhookUrl);
+  const target = number || evo.instanceNumber(instance) || '';
+  const digitsOnly = requireNumber(target);
+  const hook = webhookUrl(req);
+  const result = await evo.pairInstance(instance, digitsOnly, hook);
 
   console.log(
     `[connect] pair ${instance}: state=${result.state} pairingCode=${result.pairingCode ? 'yes' : 'no'} qr=${result.qr ? 'yes' : 'no'} steps=${result.steps.join(' > ') || 'none'}`,
@@ -622,29 +664,45 @@ app.post(
 
 /* -------------------------------- webhook --------------------------------- */
 
-app.post(
-  '/webhook/:instance',
-  asyncRoute(async (req, res) => {
-    const instance = req.params.instance;
-    res.json({ ok: true, received: true });
-    const payload = req.body || {};
-    handleWebhook(instance, payload).catch((err) => {
-      console.error(`[webhook] ${instance} processing failed: ${err.message}`);
-    });
-  }),
-);
+/**
+ * ONE webhook endpoint for every instance: POST /webhook.
+ * The account always comes from payload.instance; the URL never decides it.
+ * `/webhook/:instance` stays only as a legacy alias for instances that still
+ * have the old per-instance URL stored in Evolution - it resolves the same way
+ * and duplicates are dropped by the message-id check.
+ */
+const webhookHandler = asyncRoute(async (req, res) => {
+  const payload = req.body && typeof req.body === 'object' ? req.body : {};
+  res.json({ ok: true, received: true });
+  const account = payload.instance || payload.instanceName || req.params.instance || 'unknown';
+  handleWebhook(payload, req.params.instance || '').catch((err) => {
+    console.error(`[webhook] ${account} processing failed: ${err.message}`);
+  });
+});
 
-app.get('/webhook/:instance', (req, res) => {
+app.post('/webhook', webhookHandler);
+app.post('/webhook/:instance', webhookHandler);
+
+app.get('/webhook', (req, res) => {
   res.json({
     ok: true,
-    webhook: `${baseUrl(req)}/webhook/${req.params.instance}`,
+    webhook: webhookUrl(req),
     events: ['MESSAGES_UPSERT', 'QRCODE_UPDATED', 'CONNECTION_UPDATE'],
   });
 });
 
-async function handleWebhook(instance, payload) {
+app.get('/webhook/:instance', (req, res) => {
+  res.json({
+    ok: true,
+    webhook: webhookUrl(req),
+    events: ['MESSAGES_UPSERT', 'QRCODE_UPDATED', 'CONNECTION_UPDATE'],
+  });
+});
+
+async function handleWebhook(payload, urlInstance = '') {
   const event = String(payload.event || payload.type || '').toLowerCase();
-  const instanceName = payload.instance || payload.instanceName || instance || 'unknown';
+  // The account is taken from the payload, never from the URL.
+  const instanceName = payload.instance || payload.instanceName || urlInstance || 'unknown';
 
   // qrcode.updated only ever carries QR data. It is cached for the QR panel,
   // but the pairing code is never read from it - that only comes from connect.
@@ -690,6 +748,13 @@ async function handleWebhook(instance, payload) {
   const pushName = data.pushName || key.participant || (isGroup ? remoteJid.split('@')[0] : '');
   const timestamp = timestampToIso(data.messageTimestamp);
   const waMessageId = key.id || null;
+
+  // Same event delivered twice (two webhook URLs, Evolution retries): store and
+  // answer it exactly once. This check runs before any media download or AI call.
+  if (alreadyHandled(instanceName, waMessageId)) {
+    console.log(`[webhook] ${instanceName} duplicate ${waMessageId} - ignored`);
+    return;
+  }
 
   console.log(
     `[webhook] ${instanceName} ${isGroup ? 'group' : 'chat'} ${remoteJid} type=${messageType} from=${pushName || 'unknown'}`,
@@ -1154,7 +1219,9 @@ app.post(
 /* ------------------------------ SPA + errors ------------------------------ */
 
 app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api/') || req.path.startsWith('/webhook/')) return next();
+  if (req.path.startsWith('/api/') || req.path === '/webhook' || req.path.startsWith('/webhook/')) {
+    return next();
+  }
   res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
 
@@ -1229,7 +1296,7 @@ async function start() {
   app.listen(port, '0.0.0.0', () => {
     console.log('[server] Listening on', port);
     console.log(`[server] listening on http://0.0.0.0:${port}`);
-    console.log(`[server] webhook base: ${String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${port}`).replace(/\/+$/, '')}/webhook/:instance`);
+    console.log(`[server] webhook: ${String(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${port}`).replace(/\/+$/, '')}/webhook`);
   });
 }
 

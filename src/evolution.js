@@ -99,9 +99,12 @@ export async function createInstance(instanceName, webhookUrl, { number } = {}) 
   if (!name) throw new AppError('Instance name is required', 400, 'invalid_instance');
 
   const digitsOnly = number ? String(number).replace(/\D/g, '') : (instanceNumber(name) || '');
-  const body = { instanceName: name, qrcode: true, integration: 'WHATSAPP-BAILEYS' };
-  // Passing the number makes Evolution return a pairing code on create.
-  if (digitsOnly) body.number = digitsOnly;
+  // An instance must never be created without its number: with `number` Evolution
+  // returns a pairing code, without it the instance is useless for pairing.
+  if (digitsOnly.length < 8) {
+    throw new AppError('A WhatsApp number with country code is required', 400, 'invalid_number');
+  }
+  const body = { instanceName: name, qrcode: true, integration: 'WHATSAPP-BAILEYS', number: digitsOnly };
 
   const data = await call('POST', '/instance/create', body, 45000);
 
@@ -146,12 +149,12 @@ export async function setWebhook(instance, url) {
 }
 
 /** Create the instance when it does not exist yet, then reuse it. */
-export async function ensureInstance(instanceName, webhookUrl) {
+export async function ensureInstance(instanceName, webhookUrl, { number } = {}) {
   const name = String(instanceName || '').trim();
   if (!name) throw new AppError('Instance name is required', 400, 'invalid_instance');
   const existing = await fetchInstances().catch(() => []);
   if (existing.some((item) => item.name === name)) return { instance: name, created: false };
-  const created = await createInstance(name, webhookUrl);
+  const created = await createInstance(name, webhookUrl, { number });
   return { instance: name, created: true, webhook: created.webhook };
 }
 
